@@ -26,6 +26,7 @@ __all__ = [
     'bit',
     'List',
     'Tuple',
+    'Axi',
 ]
 __all__ += ['bit' + str(i) for i in range(2, 129)]
 __all__ += ['int' + str(i) for i in range(2, 129)]
@@ -43,6 +44,14 @@ class List(list, metaclass=GenericMeta):
 
 class Tuple(tuple, metaclass=GenericMeta):
     pass
+
+
+class TagMeta(object):
+    def __getitem__(self, i):
+        return i
+
+
+Axi = TagMeta()
 
 
 class int_base:

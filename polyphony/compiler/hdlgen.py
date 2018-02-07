@@ -3,7 +3,7 @@ from .env import env
 from .ir import Ctx, CONST
 from .ahdl import *
 from .ahdlvisitor import AHDLVisitor
-from .hdlmodule import FIFOModule
+from .hdlmodule import FIFOModule, AxiSlaveModule
 from .hdlmemport import HDLMemPortMaker, HDLTuplePortMaker, HDLRegArrayPortMaker
 from .hdlinterface import *
 from .memref import *
@@ -285,13 +285,20 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
         self._add_state_constants(fsm)
         defs, uses, outputs = self._collect_vars(fsm)
         locals = defs.union(uses)
-        module_name = self.hdlmodule.name
         self._add_state_register(fsm)
-        callif = CallInterface('', module_name)
-        self.hdlmodule.add_interface('', callif)
+        self._add_call_interface(scope)
         self._add_input_interfaces(scope)
         self._add_output_interfaces(scope)
         self._add_internal_ports(locals)
+        self.hdlmodule.add_interface('s_axi', AxiSlaveInterface('s_axi', 32, 32))
+
+        axi_read_infs = [x for x in self.hdlmodule.interfaces.values() if isinstance(x, AxiSlaveInternalReadInterface)]
+        axi_write_infs = [x for x in self.hdlmodule.interfaces.values() if isinstance(x, AxiSlaveInternalWriteInterface)]
+        axi_call_inf = [x for x in self.hdlmodule.interfaces.values() if isinstance(x, AxiCallInterface)]
+        axi_call_inf = axi_call_inf[0] if len(axi_call_inf) > 0 else None
+
+        slave_module = AxiSlaveModule('s_axi', axi_read_infs, axi_write_infs, axi_call_inf)
+        self.hdlmodule.add_sub_module('s_axi_inst', slave_module, slave_module.connections())
 
         HDLMemPortMaker(mrg.collect_ram(scope), scope, self.hdlmodule).make_port_all()
 
@@ -315,9 +322,13 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
             params = scope.params
         for i, (sym, copy, _) in enumerate(params):
             if sym.typ.is_int() or sym.typ.is_bool():
-                sig_name = '{}_{}'.format(scope.orig_name, sym.hdl_name())
-                sig = self.hdlmodule.signal(sig_name)
-                inf = SingleReadInterface(sig, sym.hdl_name(), scope.orig_name)
+                if sym.typ.has_protocol() and sym.typ.get_protocol() == 'axi':
+                    sig = self.hdlmodule.signal(copy.hdl_name())
+                    inf = AxiSlaveInternalReadInterface(sig, copy.hdl_name(), scope.orig_name)
+                else:
+                    sig_name = '{}_{}'.format(scope.orig_name, sym.hdl_name())
+                    sig = self.hdlmodule.signal(sig_name)
+                    inf = SingleReadInterface(sig, sym.hdl_name(), scope.orig_name)
             elif sym.typ.is_list():
                 memnode = sym.typ.get_memnode()
                 if memnode.can_be_reg():
@@ -352,10 +363,25 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
         if scope.return_type.is_scalar():
             sig_name = '{}_out_0'.format(scope.orig_name)
             sig = self.hdlmodule.signal(sig_name)
-            inf = SingleWriteInterface(sig, 'out_0', scope.orig_name)
+            if scope.return_type.has_protocol() and scope.return_type.get_protocol() == 'axi':
+                inf = AxiSlaveInternalWriteInterface(sig, 'out_0', scope.orig_name)
+                self.hdlmodule.add_internal_reg(sig)
+            else:
+                inf = SingleWriteInterface(sig, 'out_0', scope.orig_name)
             self.hdlmodule.add_interface(inf.if_name, inf)
         elif scope.return_type.is_seq():
             raise NotImplementedError('return of a suquence type is not implemented')
+
+    def _add_call_interface(self, scope):
+        module_name = self.hdlmodule.name
+        if scope.return_type.has_protocol() and scope.return_type.get_protocol() == 'axi':
+            callif = AxiCallInterface('', module_name)
+            self.hdlmodule.add_internal_reg(Signal(callif.port_name(Port("valid", 0, 'in', True)), 1, {"reg"}))
+            self.hdlmodule.add_internal_net(Signal(callif.port_name(Port("accept", 0, 'in', True)), 1, {"net"}))
+            self.hdlmodule.add_internal_net(Signal(callif.port_name(Port("ready", 0, 'in', True)), 1, {"net"}))
+        else:
+            callif = CallInterface('', module_name)
+        self.hdlmodule.add_interface('', callif)
 
 
 def accessor2module(acc):

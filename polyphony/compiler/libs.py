@@ -150,3 +150,163 @@ always @(posedge clk) begin
 end
 endmodule
 """
+
+axi_slave = """
+module {module_name}
+#(parameter
+    C_S_AXI_ADDR_WIDTH = 6,
+    C_S_AXI_DATA_WIDTH = 32
+)(
+    // user signals
+    {custom_ports}
+    // axi4 lite slave signals
+    input  wire                          clk,
+    input  wire                          rst,
+    input  wire [C_S_AXI_ADDR_WIDTH-1:0] S_AXI_AWADDR,
+    input  wire                          S_AXI_AWVALID,
+    output wire                          S_AXI_AWREADY,
+    input  wire [C_S_AXI_DATA_WIDTH-1:0] S_AXI_WDATA,
+    input  wire [C_S_AXI_DATA_WIDTH/8-1:0] S_AXI_WSTRB,
+    input  wire                          S_AXI_WVALID,
+    output wire                          S_AXI_WREADY,
+    output wire [1:0]                    S_AXI_BRESP,
+    output wire                          S_AXI_BVALID,
+    input  wire                          S_AXI_BREADY,
+    input  wire [C_S_AXI_ADDR_WIDTH-1:0] S_AXI_ARADDR,
+    input  wire                          S_AXI_ARVALID,
+    output wire                          S_AXI_ARREADY,
+    output wire [C_S_AXI_DATA_WIDTH-1:0] S_AXI_RDATA,
+    output wire [1:0]                    S_AXI_RRESP,
+    output wire                          S_AXI_RVALID,
+    input  wire                          S_AXI_RREADY,
+    output wire                          interrupt
+);
+//------------------------Parameter----------------------
+localparam
+{address_defs}
+
+    WRIDLE            = 2'd0,
+    WRDATA            = 2'd1,
+    WRRESP            = 2'd2,
+    RDIDLE            = 2'd0,
+    RDDATA            = 2'd1,
+    ADDR_BITS         = 6;
+
+//------------------------Local signal-------------------
+    reg  [1:0]                    wstate;
+    reg  [1:0]                    wnext;
+    reg  [ADDR_BITS-1:0]          waddr;
+    wire [31:0]                   wmask;
+    wire                          aw_hs;
+    wire                          w_hs;
+    reg  [1:0]                    rstate;
+    reg  [1:0]                    rnext;
+    reg  [31:0]                   rdata;
+    wire                          ar_hs;
+    wire [ADDR_BITS-1:0]          raddr;
+
+    // internal registers
+{register_defs}
+
+//------------------------Instantiation------------------
+
+//------------------------AXI write fsm------------------
+assign S_AXI_AWREADY = (wstate == WRIDLE);
+assign S_AXI_WREADY  = (wstate == WRDATA);
+assign S_AXI_BRESP   = 2'b00;  // OKAY
+assign S_AXI_BVALID  = (wstate == WRRESP);
+assign wmask   = {{ {{8{{S_AXI_WSTRB[3]}}}}, {{8{{S_AXI_WSTRB[2]}}}}, {{8{{S_AXI_WSTRB[1]}}}}, {{8{{S_AXI_WSTRB[0]}}}} }};
+assign aw_hs   = S_AXI_AWVALID & S_AXI_AWREADY;
+assign w_hs    = S_AXI_WVALID & S_AXI_WREADY;
+
+// wstate
+always @(posedge clk) begin
+    if (rst)
+        wstate <= WRIDLE;
+    else
+        wstate <= wnext;
+end
+
+// wnext
+always @(*) begin
+    case (wstate)
+        WRIDLE:
+            if (S_AXI_AWVALID)
+                wnext = WRDATA;
+            else
+                wnext = WRIDLE;
+        WRDATA:
+            if (S_AXI_WVALID)
+                wnext = WRRESP;
+            else
+                wnext = WRDATA;
+        WRRESP:
+            if (S_AXI_BREADY)
+                wnext = WRIDLE;
+            else
+                wnext = WRRESP;
+        default:
+            wnext = WRIDLE;
+    endcase
+end
+
+// waddr
+always @(posedge clk) begin
+    if (aw_hs)
+        waddr <= S_AXI_AWADDR[ADDR_BITS-1:0];
+end
+
+//------------------------AXI read fsm-------------------
+assign S_AXI_ARREADY = (rstate == RDIDLE);
+assign S_AXI_RDATA   = rdata;
+assign S_AXI_RRESP   = 2'b00;  // OKAY
+assign S_AXI_RVALID  = (rstate == RDDATA);
+assign ar_hs   = S_AXI_ARVALID & S_AXI_ARREADY;
+assign raddr   = S_AXI_ARADDR[ADDR_BITS-1:0];
+
+// rstate
+always @(posedge clk) begin
+    if (rst)
+        rstate <= RDIDLE;
+    else
+        rstate <= rnext;
+end
+
+// rnext
+always @(*) begin
+    case (rstate)
+        RDIDLE:
+            if (S_AXI_ARVALID)
+                rnext = RDDATA;
+            else
+                rnext = RDIDLE;
+        RDDATA:
+            if (S_AXI_RREADY & S_AXI_RVALID)
+                rnext = RDIDLE;
+            else
+                rnext = RDDATA;
+        default:
+            rnext = RDIDLE;
+    endcase
+end
+
+// rdata
+always @(posedge clk) begin
+    if (ar_hs) begin
+        rdata <= 1'b0;
+        case (raddr)
+{read_defs}
+        endcase
+    end
+end
+
+
+//------------------------Register logic-----------------
+
+{assign_defs}
+{write_defs}
+//------------------------Memory logic-------------------
+
+endmodule
+
+"""

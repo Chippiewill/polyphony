@@ -141,6 +141,14 @@ class Type(object):
             else:
                 # TODO: use Type.any
                 return Type.tuple(Type.int(), None, Type.ANY_LENGTH)
+        elif scope.orig_name == 'Axi':
+            if elms:
+                assert len(elms) == 1
+                t = elms[0]
+            else:
+                t = Type('undef')
+            t.set_protocol('axi')
+            return t
         else:
             assert False
 

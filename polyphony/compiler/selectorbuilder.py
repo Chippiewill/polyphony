@@ -175,7 +175,7 @@ class SelectorBuilder(object):
     def _build_sub_module_selectors(self):
         for name, sub_module, connections, param_map in self.hdlmodule.sub_modules.values():
             # TODO
-            if sub_module.name == 'fifo':
+            if sub_module.name in ('fifo', 'axi_slave'):
                 continue
             if connections:
                 self._add_sub_module_accessors(connections)

@@ -71,6 +71,10 @@ def port2ahdl(inf, name):
     return AHDL_SYMBOL(inf.port_name(inf.ports[name]))
 
 
+def fake2ahdl(inf, name):
+    return AHDL_SYMBOL(inf.port_name(Port(name, 0, 'in', True)))
+
+
 class Interface(object):
     def __init__(self, if_name, if_owner_name):
         self.if_name = if_name
@@ -1123,6 +1127,225 @@ class PipelinedFIFOWriteAccessor(FIFOWriteAccessor):
 
     def pipelined_write_sequence(self, step, step_n, dst, stage):
         return fifo_pipelined_write_seq(self, step, dst, stage)
+
+
+class AxiSlaveInternalInterface(object):
+    pass
+
+
+class AxiSlaveInternalReadInterface(Interface, AxiSlaveInternalInterface):
+    def __init__(self, signal, if_name='', if_owner_name=''):
+        super().__init__(if_name, if_owner_name)
+        self.signal = signal
+
+    def accessor(self, inst_name=''):
+        return AxiSlaveInternalAccessor(self, inst_name)
+
+
+# TODO: This should actually control the axi
+class AxiSlaveInternalAccessor(IOAccessor):
+    def __init__(self, inf, inst_name):
+        super().__init__(inf, inst_name)
+
+    def write_sequence(self, step, step_n, src):
+        return ()
+
+    def read_sequence(self, step, step_n, src):
+        return ()
+
+
+class AxiSlaveInternalWriteInterface(SinglePortInterface, WriteInterface, AxiSlaveInternalInterface):
+    # def accessor(self, inst_name=''):
+    #     acc = SingleReadAccessor(self, inst_name)
+    #     return acc
+
+    def reset_stms(self):
+        stms = []
+        if hasattr(self.signal, 'init_value'):
+            iv = self.signal.init_value
+        else:
+            iv = 0
+        stms.append(AHDL_MOVE(AHDL_SYMBOL(self.signal.name),
+                              AHDL_CONST(iv)))
+        if self.signal.is_valid_protocol() or self.signal.is_ready_valid_protocol():
+            valid = port2ahdl(self, 'valid')
+            stms.append(AHDL_MOVE(valid, AHDL_CONST(0)))
+        return []
+
+    def write_sequence(self, step, step_n, src):
+        return single_write_seq(self, self.signal, step, src)
+
+    def accessor(self, inst_name=''):
+        return AxiSlaveInternalAccessor(self, inst_name)
+
+
+class AxiSlaveInterface(Interface):
+    def __init__(self, name, data_width, addr_width):
+        super().__init__(name, '')
+        self.data_width = data_width
+        self.addr_width = addr_width
+        self.wstrb_width = int(data_width / 8)
+        self.ports.append(Port('S_AXI_AWVALID', 1, 'in', False))
+        self.ports.append(Port('S_AXI_AWREADY', 1, 'out', False))
+        self.ports.append(Port('S_AXI_AWADDR', addr_width, 'in', False))
+        self.ports.append(Port('S_AXI_WVALID', 1, 'in', False))
+        self.ports.append(Port('S_AXI_WREADY', 1, 'out', False))
+        self.ports.append(Port('S_AXI_WDATA', data_width, 'in', False))
+        self.ports.append(Port('S_AXI_WSTRB', self.wstrb_width, 'in', False))
+        self.ports.append(Port('S_AXI_ARVALID', 1, 'in', False))
+        self.ports.append(Port('S_AXI_ARREADY', 1, 'out', False))
+        self.ports.append(Port('S_AXI_ARADDR', addr_width, 'in', False))
+        self.ports.append(Port('S_AXI_RVALID', 1, 'out', False))
+        self.ports.append(Port('S_AXI_RDATA', data_width, 'out', False))
+        self.ports.append(Port('S_AXI_RRESP', 2, 'out', False))
+        self.ports.append(Port('S_AXI_BVALID', 1, 'out', False))
+        self.ports.append(Port('S_AXI_BREADY', 1, 'in', False))
+        self.ports.append(Port('S_AXI_BRESP', 2, 'out', False))
+
+    def accessor(self, inst_name=''):
+        return AxiSlaveAccessor(self, inst_name)
+
+    def regs(self):
+        return Ports()
+
+    # Everything should be nets since we're just proxying
+    def nets(self):
+        return self.ports
+
+
+class AxiSlaveAccessor(IOAccessor):
+    def __init__(self, inf, inst_name):
+        super().__init__(inf, inst_name)
+        self.ports = inf.ports.flipped()
+
+    def write_sequence(self, step, step_n, src):
+        return ()
+
+    def read_sequence(self, step, step_n, src):
+        return ()
+
+
+class AxiSlaveModuleInterface(AxiSlaveInterface):
+    def __init__(self, name, data_width, addr_width):
+        super().__init__(name, data_width, addr_width)
+
+    def accessor(self, inst_name=''):
+        return AxiSlaveModuleAccessor(self, inst_name)
+
+    def port_name(self, port):
+        return port.name
+
+
+class AxiSlaveModuleAccessor(IOAccessor):
+    def __init__(self, inf, inst_name):
+        super().__init__(inf, inst_name)
+        self.ports = inf.ports.flipped()
+
+    def port_name(self, port):
+        return '{}_{}'.format(self.acc_name, port.name)
+
+
+class AxiSlaveModuleSubWriteInterface(SingleWriteInterface):
+    def nets(self):
+        return self.ports
+
+    def regs(self):
+        return Ports([])
+
+
+class AxiSlaveModuleSubReadInterface(SingleReadInterface):
+    def nets(self):
+        return self.ports
+
+    def regs(self):
+        return Ports([])
+
+
+class AxiCallInterface(Interface):
+    def __init__(self, name, owner_name=''):
+        super().__init__(name, owner_name)
+
+    def accessor(self, inst_name=''):
+        acc = AxiCallAccessor(self, inst_name)
+        return acc
+
+    def reset_stms(self):
+        stms = []
+        for p in self.ports.outports():
+            stms.append(AHDL_MOVE(AHDL_SYMBOL(self.port_name(p)),
+                                  AHDL_CONST(0)))
+        return stms
+
+    def callee_prolog(self, step, name):
+        if step == 0:
+            valid = fake2ahdl(self, 'valid')
+            ready = fake2ahdl(self, 'ready')
+
+            unset_valid = AHDL_MOVE(valid, AHDL_CONST(0))
+            expects = [(AHDL_CONST(1), ready)]
+            wait_ready = AHDL_META_WAIT("WAIT_VALUE", *expects)
+            return (unset_valid, wait_ready)
+
+    def callee_epilog(self, step, name):
+        if step == 0:
+            valid = fake2ahdl(self, 'valid')
+            accept = fake2ahdl(self, 'accept')
+
+            set_valid = AHDL_MOVE(valid, AHDL_CONST(1))
+            expects = [(AHDL_CONST(1), accept)]
+            wait_accept = AHDL_META_WAIT("WAIT_VALUE", *expects)
+            return (set_valid, wait_accept)
+
+
+class AxiSlaveModuleSubCallInterface(CallInterface):
+    def nets(self):
+        return self.ports
+
+    def regs(self):
+        return Ports([])
+
+
+class AxiCallAccessor(IOAccessor):
+    def __init__(self, inf, inst_name):
+        super().__init__(inf, inst_name)
+        self.ports = inf.ports.clone()
+
+    def port_name(self, port):
+        assert self.inst_name
+        return '{}_{}'.format(self.inst_name, self.inf._port_name(port))
+
+    def reset_stms(self):
+        stms = []
+        for p in self.ports.inports():
+            stms.append(AHDL_MOVE(AHDL_SYMBOL(self.port_name(p)),
+                                  AHDL_CONST(0)))
+        return stms
+
+    def call_sequence(self, step, step_n, argaccs, retaccs, ahdl_call):
+        seq = []
+        valid = fake2ahdl(self, 'valid')
+        ready = fake2ahdl(self, 'ready')
+        accept = fake2ahdl(self, 'accept')
+
+        if step == 0:
+            seq = [AHDL_MOVE(ready, AHDL_CONST(1))]
+            for acc, arg in zip(argaccs, ahdl_call.args):
+                if arg.is_a(AHDL_MEMVAR):
+                    continue
+                seq.extend(acc.write_sequence(0, step_n, arg))
+        elif step == 1:
+            seq = [AHDL_MOVE(ready, AHDL_CONST(0))]
+
+        if step == step_n - 3:
+            expects = [(AHDL_CONST(1), valid)]
+            seq.append(AHDL_META_WAIT('WAIT_VALUE', *expects))
+        elif step == step_n - 2:
+            for acc, ret in zip(retaccs, ahdl_call.returns):
+                seq.extend(acc.read_sequence(0, step_n, ret))
+            seq.append(AHDL_MOVE(accept, AHDL_CONST(1)))
+        elif step == step_n - 1:
+            seq.append(AHDL_MOVE(accept, AHDL_CONST(0)))
+        return tuple(seq)
 
 
 def create_local_accessor(signal):

@@ -1,5 +1,7 @@
 ﻿from collections import defaultdict, OrderedDict
 from logging import getLogger
+
+from .vericodegen import VerilogCodeGen
 from .hdlinterface import *
 from . import libs
 from .env import env
@@ -325,3 +327,113 @@ class FIFOModule(HDLModule):
                           'DATA_WIDTH': data_width}
         self.add_interface('', self.inf)
         env.add_using_lib(libs.fifo)
+
+
+class AxiSlaveModule(HDLModule):
+    def __init__(self, module_name, internal_write_infs, internal_read_infs, call_inf=None):
+        super().__init__(None, 'axi_slave', 'AXILiteS_s_axi')
+        self.inf = AxiSlaveModuleInterface(module_name, 32, 32)
+        self.internal_infs = [AxiSlaveModuleSubWriteInterface(x.signal) for x in internal_write_infs] \
+                             + [AxiSlaveModuleSubReadInterface(x.signal) for x in internal_read_infs]
+        if call_inf:
+            self.internal_infs.append(AxiSlaveModuleSubCallInterface(call_inf.if_name, call_inf.if_owner_name))
+            self.internal_infs[-1].ports = self.internal_infs[-1].ports.flipped()
+        self.param_map = {'C_S_AXI_DATA_WIDTH': 32,
+                          'C_S_AXI_ADDR_WIDTH': 4}
+
+        env.add_using_lib(str(self))
+
+    def connections(self):
+        connections = [(self.inf, self.inf.accessor())]
+        connections += [(x, x.accessor()) for x in self.internal_infs if not isinstance(x, CallInterface)]
+        connections += [(x, x.accessor(x.if_owner_name)) for x in self.internal_infs if isinstance(x, CallInterface)]
+
+        return {
+            "": connections,
+            "ret": []
+        }
+
+    def __str__(self):
+        str_ports = []
+        for interface in self.internal_infs:
+            str_ports += VerilogCodeGen._get_io_names_from(interface)
+        str_ports = ''.join(['{},\n    '.format(port) for port in str_ports])
+
+        Address = namedtuple('Address', ('name', 'width', 'address', 'port'))
+        Register = namedtuple('Register', ('name', 'width', 'signed', 'addresses', 'port_name', 'sig_type'))
+
+        def address_to_varname(address: Address):
+            return "ADDR_{}".format(address.name.upper())
+
+        def format_address_definition(address: Address):
+            return "    {} = 6'h{:02x},".format(address_to_varname(address), address.address)
+
+        def format_register_definition(register: Register):
+            signedness = "signed" if register.signed else ""
+            return "    reg {} [{}:0] {};".format(signedness, register.width - 1, register.name)
+
+        def format_assign_definition(register: Register):
+            return "assign {} = {};".format(register.port_name, register.name)
+
+        address_base = 0
+        addresses = []
+        registers = []
+        for interface in self.internal_infs:
+            for port in interface.ports:
+                if port.width % 32 != 0:
+                    res = [port.width % 32] + [32] * (port.width // 32)
+                else:
+                    res = [32] * (port.width // 32)
+
+                laddresses = []
+                for i, r in enumerate(res):
+                    laddresses.append(Address("{}_{}".format(interface.port_name(port), i), r, address_base, port))
+                    address_base += 4
+                addresses += laddresses
+
+                if port.dir == "out":
+                    register_name = "{}_int".format(interface.port_name(port))
+                    port_name = interface.port_name(port)
+                    registers.append(Register(register_name, port.width, port.signed, laddresses, port_name, "reg"))
+                else:
+                    registers.append(Register(interface.port_name(port), port.width, port.signed, laddresses, "", "net"))
+
+        address_defs = "\n".join(format_address_definition(address) for address in addresses)
+        register_defs = "\n".join(format_register_definition(register) for register in registers if register.sig_type == "reg")
+        assign_defs = "\n".join(format_assign_definition(register) for register in registers if register.sig_type == "reg")
+
+        write_defs = []
+        read_defs = []
+        for register in registers:
+            current_bit = register.width - 1
+            for address in register.addresses:
+                write_def_template = """
+// {reg_name}{range_def}
+always @(posedge clk) begin
+    if (rst)
+        {reg_name}{range_def} <= 0;
+    else begin
+        if (w_hs && waddr == {address_name})
+            {reg_name}{range_def} <= (S_AXI_WDATA[{width_bit}:0] & wmask) | ({reg_name}{range_def} & ~wmask);
+    end
+end"""
+                read_def_template = """            {address_name}: begin
+                rdata <= {reg_name}{range_def};
+            end"""
+                width_bit = address.width - 1
+
+                if address.width > 1:
+                    range_def = "[{top_bit}:{bottom_bit}]".format(top_bit=current_bit, bottom_bit=current_bit - width_bit)
+                else:
+                    range_def = ""
+
+                if register.sig_type == 'reg':
+                    write_defs.append(write_def_template.format(reg_name=register.name, range_def=range_def, width_bit=width_bit, address_name=address_to_varname(address)))
+                read_defs.append(read_def_template.format(reg_name=register.name, range_def=range_def, address_name=address_to_varname(address)))
+                current_bit -= address.width
+
+        write_defs = "\n".join(write_defs)
+        read_defs = "\n".join(read_defs)
+
+        return libs.axi_slave.format(module_name=self.qualified_name, custom_ports=str_ports, address_defs=address_defs, register_defs=register_defs, assign_defs=assign_defs, write_defs=write_defs, read_defs=read_defs)
+

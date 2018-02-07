@@ -3,3 +3,5 @@ __pycache__
 debug*
 tmp/
 out/
+.idea
+venv

@@ -189,28 +189,30 @@ class VerilogCodeGen(AHDLVisitor):
                 for decl in sorted(decls, key=lambda d: str(d)):
                     self.visit(decl)
 
-    def _get_io_names_from(self, interface):
+    @classmethod
+    def _get_io_names_from(cls, interface):
         in_names = []
         out_names = []
         for port in interface.regs():
             if port.dir == 'in':
                 assert False
             else:
-                io_name = self._to_io_name(port.width, 'reg', 'output', port.signed,
+                io_name = cls._to_io_name(port.width, 'reg', 'output', port.signed,
                                            interface.port_name(port))
                 out_names.append(io_name)
         for port in interface.nets():
             if port.dir == 'in':
-                io_name = self._to_io_name(port.width, 'wire', 'input', port.signed,
+                io_name = cls._to_io_name(port.width, 'wire', 'input', port.signed,
                                            interface.port_name(port))
                 in_names.append(io_name)
             else:
-                io_name = self._to_io_name(port.width, 'wire', 'output', port.signed,
+                io_name = cls._to_io_name(port.width, 'wire', 'output', port.signed,
                                            interface.port_name(port))
                 out_names.append(io_name)
         return in_names + out_names
 
-    def _to_io_name(self, width, typ, io, signed, port_name):
+    @staticmethod
+    def _to_io_name(width, typ, io, signed, port_name):
         if is_verilog_keyword(port_name):
             port_name = port_name + '_'
         if width == 1:

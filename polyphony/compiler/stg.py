@@ -1153,6 +1153,14 @@ class AHDLTranslator(object):
         elif sym.is_condition():
             tags.add('condition')
 
+        if sym.typ.has_protocol() and sym.typ.get_protocol() == 'axi':
+            if not sym.is_return():
+                tags.discard('reg')
+                tags.add('net')
+            else:
+                tags.discard('net')
+                tags.add('reg')
+
         if sym.is_alias():
             tags.discard('reg')
             tags.add('net')
@@ -1310,6 +1318,8 @@ class AHDLTranslator(object):
         if not src:
             return
         elif src.is_a(AHDL_VAR) and dst.is_a(AHDL_VAR) and src.sig == dst.sig:
+            return
+        elif src.is_a(AHDL_VAR) and dst.is_a(AHDL_VAR) and ir.src.sym.typ.has_protocol() and ir.src.sym.typ.get_protocol() == 'axi':
             return
         elif src.is_a(AHDL_LOAD):
             self._emit_memload_sequence(src, self.sched_time)

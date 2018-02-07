@@ -52,6 +52,7 @@ __all__ = [
     'uint121', 'uint122', 'uint123', 'uint124', 'uint125', 'uint126', 'uint127', 'uint128',
     'List',
     'Tuple',
+    'Axi',
 ]
 
 class bit: pass
@@ -441,3 +442,4 @@ class uint128: pass
 
 class List: pass
 class Tuple: pass
+class Axi: pass
