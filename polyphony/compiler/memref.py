@@ -791,6 +791,10 @@ class MemRefGraphBuilder(IRVisitor):
                     mem_t = Type.list(elm_t, memnode)
                 else:
                     mem_t = Type.tuple(elm_t, memnode, ir.sym.typ.get_length())
+
+                if memsym.typ.has_protocol():
+                    mem_t.set_protocol(memsym.typ.get_protocol())
+
                 self._set_type(memsym, mem_t)
 
     def visit_ARRAY(self, ir):
@@ -852,6 +856,10 @@ class MemRefGraphBuilder(IRVisitor):
                     mem_t.set_length(memsym.typ.get_length())
             else:
                 mem_t = Type.tuple(elem_t, memnode, memsym.typ.get_length())
+
+            if memsym.typ.has_protocol():
+                mem_t.set_protocol(memsym.typ.get_protocol())
+
             self._set_type(memsym, mem_t)
             if ir.src.is_a(TEMP):
                 self._append_edge(ir.src.sym, memsym)

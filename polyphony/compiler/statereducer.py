@@ -82,7 +82,8 @@ class WaitForwarder(AHDLVisitor):
 
     def merge_wait_function(self, wait_func):
         next_state_codes = wait_func.transition.target.codes
-        if next_state_codes[-1].is_a(AHDL_META_WAIT):
+        if any(n.is_a(AHDL_META_WAIT) for n in next_state_codes):
+        #if next_state_codes[-1].is_a(AHDL_META_WAIT):
             return
         if wait_func.codes:
             wait_func.codes.extend(wait_func.transition.target.codes)

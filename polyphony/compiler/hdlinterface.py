@@ -1196,6 +1196,7 @@ class AxiSlaveInterface(Interface):
         self.ports.append(Port('S_AXI_ARREADY', 1, 'out', False))
         self.ports.append(Port('S_AXI_ARADDR', addr_width, 'in', False))
         self.ports.append(Port('S_AXI_RVALID', 1, 'out', False))
+        self.ports.append(Port('S_AXI_RREADY', 1, 'in', False))
         self.ports.append(Port('S_AXI_RDATA', data_width, 'out', False))
         self.ports.append(Port('S_AXI_RRESP', 2, 'out', False))
         self.ports.append(Port('S_AXI_BVALID', 1, 'out', False))
@@ -1346,6 +1347,143 @@ class AxiCallAccessor(IOAccessor):
         elif step == step_n - 1:
             seq.append(AHDL_MOVE(accept, AHDL_CONST(0)))
         return tuple(seq)
+
+
+class AxiRAMAccessor(Accessor):
+    def __init__(self, signal, data_width, addr_width, is_sink=True):
+        inf = Interface(signal.name, '')
+        inf.signal = signal
+        super().__init__(inf)
+        self.data_width = data_width
+        self.addr_width = addr_width
+        self.is_sink = is_sink
+        self.wstrb_width = int(data_width / 8)
+        self.ports.append(Port('M_AXI_AWVALID', 1, 'in', False))
+        self.ports.append(Port('M_AXI_AWREADY', 1, 'out', False))
+        self.ports.append(Port('M_AXI_AWADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_WVALID', 1, 'in', False))
+        self.ports.append(Port('M_AXI_WREADY', 1, 'out', False))
+        self.ports.append(Port('M_AXI_WDATA', data_width, 'in', False))
+        self.ports.append(Port('M_AXI_WSTRB', self.wstrb_width, 'in', False))
+        self.ports.append(Port('M_AXI_ARVALID', 1, 'in', False))
+        self.ports.append(Port('M_AXI_ARREADY', 1, 'out', False))
+        self.ports.append(Port('M_AXI_ARADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_RVALID', 1, 'out', False))
+        self.ports.append(Port('M_AXI_RREADY', 1, 'in', False))
+        self.ports.append(Port('M_AXI_RDATA', data_width, 'out', False))
+        self.ports.append(Port('M_AXI_RRESP', 2, 'out', False))
+        self.ports.append(Port('M_AXI_BVALID', 1, 'out', False))
+        self.ports.append(Port('M_AXI_BREADY', 1, 'in', False))
+        self.ports.append(Port('M_AXI_BRESP', 2, 'out', False))
+
+    def regs(self):
+        if self.is_sink:
+            return self.ports.inports()
+        else:
+            return Ports()
+
+    def nets(self):
+        if self.is_sink:
+            return self.ports.outports()
+        else:
+            return self.ports
+
+    def reset_stms(self):
+        stms = []
+        for p in self.ports.inports():
+            stms.append(AHDL_MOVE(AHDL_SYMBOL(self.port_name(p)),
+                                  AHDL_CONST(0)))
+        return stms
+
+    def pipelined(self, stage):
+        return PipelinedRAMAccessor(self, stage)
+
+    def read_sequence(self, step, step_n, offset, dst, is_continuous):
+        ar_addr = port2ahdl(self, 'M_AXI_ARADDR')
+        ar_valid = port2ahdl(self, 'M_AXI_ARVALID')
+        ar_ready = port2ahdl(self, 'M_AXI_ARREADY')
+
+        r_valid = port2ahdl(self, 'M_AXI_RVALID')
+        r_ready = port2ahdl(self, 'M_AXI_RREADY')
+        r_data = port2ahdl(self, 'M_AXI_RDATA')
+        r_resp = port2ahdl(self, 'M_AXI_RRESP')
+
+        if step == 0:
+            expects = [(AHDL_CONST(1), ar_ready)]
+
+            return (AHDL_MOVE(ar_addr, offset),
+                    AHDL_MOVE(ar_valid, AHDL_CONST(1)),
+                    AHDL_META_WAIT('WAIT_VALUE', *expects))
+        elif step == 1:
+            expects = [(AHDL_CONST(1), r_valid)]
+
+            return (AHDL_MOVE(ar_valid, AHDL_CONST(0)),
+                    AHDL_MOVE(r_ready, AHDL_CONST(1)),
+                    AHDL_META_WAIT('WAIT_VALUE', *expects),)
+        elif step == 2:
+            if is_continuous:
+                assert "Nope"
+            if not dst:
+                assert "wut"
+
+            return (AHDL_MOVE(r_ready, AHDL_CONST(0)),
+                    AHDL_MOVE(dst, r_data))
+
+    def write_sequence(self, step, step_n, offset, src, is_continuous):
+        addr = port2ahdl(self, 'addr')
+        we = port2ahdl(self, 'we')
+        req = port2ahdl(self, 'req')
+        d = port2ahdl(self, 'd')
+
+        if step == 0:
+            we_stm = AHDL_MOVE(we, AHDL_CONST(1))
+            req_stm = AHDL_MOVE(req, AHDL_CONST(1))
+            return (AHDL_MOVE(addr, offset),
+                    we_stm,
+                    req_stm,
+                    AHDL_MOVE(d, src))
+        elif step == 1:
+            if is_continuous:
+                return tuple()
+            else:
+                return (AHDL_MOVE(req, AHDL_CONST(0)), )
+
+
+class AxiRAMBridgeInterface(Interface):
+    def __init__(self, name, owner_name, data_width, addr_width):
+        super().__init__(name, owner_name)
+        self.data_width = data_width
+        self.addr_width = addr_width
+        self.wstrb_width = int(data_width / 8)
+        self.ports.append(Port('M_AXI_AWVALID', 1, 'in', False))
+        self.ports.append(Port('M_AXI_AWREADY', 1, 'out', False))
+        self.ports.append(Port('M_AXI_AWADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_WVALID', 1, 'in', False))
+        self.ports.append(Port('M_AXI_WREADY', 1, 'out', False))
+        self.ports.append(Port('M_AXI_WDATA', data_width, 'in', False))
+        self.ports.append(Port('M_AXI_WSTRB', self.wstrb_width, 'in', False))
+        self.ports.append(Port('M_AXI_ARVALID', 1, 'in', False))
+        self.ports.append(Port('M_AXI_ARREADY', 1, 'out', False))
+        self.ports.append(Port('M_AXI_ARADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_RVALID', 1, 'out', False))
+        self.ports.append(Port('M_AXI_RREADY', 1, 'in', False))
+        self.ports.append(Port('M_AXI_RDATA', data_width, 'out', False))
+        self.ports.append(Port('M_AXI_RRESP', 2, 'out', False))
+        self.ports.append(Port('M_AXI_BVALID', 1, 'out', False))
+        self.ports.append(Port('M_AXI_BREADY', 1, 'in', False))
+        self.ports.append(Port('M_AXI_BRESP', 2, 'out', False))
+
+    def accessor(self, inst_name=''):
+        return RAMBridgeAccessor(self, inst_name)
+
+    def regs(self):
+        return Ports()
+
+    def nets(self):
+        return self.ports.flipped()
+
+    def reset_stms(self):
+        return []
 
 
 def create_local_accessor(signal):

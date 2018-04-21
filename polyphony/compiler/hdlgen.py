@@ -344,10 +344,16 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
                     self.hdlmodule.add_interface(inf.if_name, inf)
                     continue
                 else:
-                    inf = RAMBridgeInterface(memnode.name(),
-                                             self.hdlmodule.name,
-                                             memnode.data_width(),
-                                             memnode.addr_width())
+                    if sym.typ.has_protocol() and sym.typ.get_protocol() == 'axi':
+                        inf = AxiRAMBridgeInterface(memnode.name(),
+                                                 self.hdlmodule.name,
+                                                 memnode.data_width(),
+                                                 memnode.addr_width())
+                    else:
+                        inf = RAMBridgeInterface(memnode.name(),
+                                                 self.hdlmodule.name,
+                                                 memnode.data_width(),
+                                                 memnode.addr_width())
                     self.hdlmodule.node2if[memnode] = inf
             elif sym.typ.is_tuple():
                 memnode = sym.typ.get_memnode()

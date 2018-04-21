@@ -45,7 +45,10 @@ class HDLMemPortMaker(object):
             name = node.name()
             is_sink = True
         sig = self.hdlmodule.gen_sig(name, memnode.data_width())
-        acc = RAMAccessor(sig, memnode.data_width(), memnode.addr_width(), is_sink)
+        if memnode.sym.typ.has_protocol() and memnode.sym.typ.get_protocol() == 'axi':
+            acc = AxiRAMAccessor(sig, memnode.data_width(), memnode.addr_width(), is_sink)
+        else:
+            acc = RAMAccessor(sig, memnode.data_width(), memnode.addr_width(), is_sink)
         self.mrg.node2acc[node] = acc
         return acc
 
