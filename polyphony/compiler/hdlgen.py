@@ -352,6 +352,7 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
                 else:
                     sig = self.hdlmodule.gen_sig(memnode.name(), memnode.data_width(), sym=memnode.sym)
                     if sym.typ.has_protocol() and sym.typ.get_protocol() == 'axi':
+                        sig = self.hdlmodule.signal(copy.hdl_name())
                         len_signal = Signal("{}_len".format(sig.name), 32, {'int', 'net'})
                         leninf = AxiSlaveInternalReadInterface(len_signal, len_signal.name, scope.orig_name)
                         self.hdlmodule.add_interface(leninf.if_name, leninf)
@@ -366,8 +367,7 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
                                                  self.hdlmodule.name,
                                                  memnode.data_width(),
                                                  memnode.addr_width(),
-                                                    )#offset_signal)
-                        sig = self.hdlmodule.signal(copy.hdl_name())
+                                                    )
                     else:
                         inf = RAMBridgeInterface(sig, memnode.name(),
                                                  self.hdlmodule.name,

@@ -1417,7 +1417,7 @@ class AxiRAMAccessor(Accessor):
             expects = [(AHDL_CONST(1), ar_ready)]
 
             # Todo this won't work for non multiples of 8 (they need to be rounded UP to nearest 8)
-            shift = self.data_width / 8
+            shift = self.data_width // 8
             address = AHDL_OP('LShift', offset, AHDL_CONST(shift))
             address = AHDL_OP('Add', address, AHDL_VAR(self.offset_signal, Ctx.LOAD))
 
