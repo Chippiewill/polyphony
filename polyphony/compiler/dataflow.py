@@ -522,7 +522,8 @@ class DFGBuilder(object):
                     continue
                 usenode = dfg.add_stm_node(usestm)
                 dfg.add_usedef_edge(usenode, defnode)
-                self._add_usedef_edges_for_alias(dfg, usenode, defnode, usedef)
+                visited = set()
+                self._add_usedef_edges_for_alias(dfg, usenode, defnode, usedef, visited)
 
     def _is_constant_stm(self, stm):
         if stm.is_a(PHIBase):
@@ -574,6 +575,11 @@ class DFGBuilder(object):
                         if arg.is_a(TEMP) and arg.symbol().typ.is_list():
                             mem_group = arg.symbol()
                             node_groups_by_mem[mem_group].append(node)
+                elif mv.dst.is_a([TEMP, ATTR]):
+                    if mv.dst.symbol().typ.is_seq():
+                        memnode = mv.dst.symbol().typ.get_memnode()
+                        if not memnode.can_be_reg():
+                            node_groups_by_mem[mv.dst.symbol()].append(node)
             elif node.tag.is_a(EXPR):
                 expr = node.tag
                 if expr.exp.is_a(CALL):
@@ -726,7 +732,20 @@ class DFGBuilder(object):
                         dfg.add_seq_edge(port_node, node)
                     port_node = node
 
-    def _add_usedef_edges_for_alias(self, dfg, usenode, defnode, usedef):
+    @staticmethod
+    def get_memnode(stm):
+        if stm.is_mem_read():
+            m = stm.src
+        elif stm.is_mem_write():
+            m = stm.exp
+        else:
+            return None
+        return m.mem.symbol().typ.get_memnode()
+
+    def _add_usedef_edges_for_alias(self, dfg, usenode, defnode, usedef, visited):
+        if (usenode, defnode) in visited:
+            return
+        visited.add((usenode, defnode))
         stm = usenode.tag
         if stm.is_a(MOVE):
             var = stm.dst
@@ -746,9 +765,15 @@ class DFGBuilder(object):
             unode = dfg.add_stm_node(u)
             if has_exclusive_function(u):
                 dfg.add_seq_edge(unode, defnode)
+            elif unode.tag.is_mem_read() or unode.tag.is_mem_write():
+                memnode = self.get_memnode(unode.tag)
+                if not memnode.can_be_reg():
+                    dfg.add_seq_edge(unode, defnode)
+                else:
+                    dfg.add_usedef_edge(unode, defnode)
             else:
                 dfg.add_usedef_edge(unode, defnode)
-            self._add_usedef_edges_for_alias(dfg, unode, defnode, usedef)
+            self._add_usedef_edges_for_alias(dfg, unode, defnode, usedef, visited)
 
     def _remove_alias_cycle(self, dfg):
         backs = []

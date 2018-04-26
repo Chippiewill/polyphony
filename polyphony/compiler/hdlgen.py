@@ -87,7 +87,7 @@ class HDLModuleBuilder(object):
             self.hdlmodule.add_sub_module(inst_name, sub_hdlmodule, connections, param_map=param_map)
 
     def _add_external_accessor_for_submodule(self, sub_module_inf, acc):
-        if acc.acc_name not in self.hdlmodule.signals:
+        if not isinstance(acc, CallAccessor) and acc.acc_name not in self.hdlmodule.signals:
             # we have never accessed this interface
             return
         self.hdlmodule.add_accessor(acc.acc_name, acc)
@@ -105,19 +105,15 @@ class HDLModuleBuilder(object):
                     item = single_input_port_fifo_adapter(self.hdlmodule, sub_module_inf.signal, acc.inst_name)
                 self.hdlmodule.add_decl('', item)
 
-    def _add_roms(self, scope):
+    def _add_roms(self, memnodes):
         mrg = env.memref_graph
-        roms = deque()
-
-        roms.extend(mrg.collect_readonly_sink(scope))
+        roms = [n for n in memnodes if mrg.is_readonly_sink(n)]
         while roms:
             memnode = roms.pop()
-            hdl_name = memnode.sym.hdl_name()
-            if scope.is_worker():
-                hdl_name = '{}_{}'.format(scope.orig_name, hdl_name)
+            hdl_name = memnode.name()
             source = memnode.single_source()
             if source:
-                source_scope = list(source.scopes)[0]
+                source_scope = source.scope
                 if source_scope.is_class():  # class field rom
                     hdl_name = source_scope.orig_name + '_field_' + hdl_name
             output_sig = self.hdlmodule.gen_sig(hdl_name, memnode.data_width())  # TODO
@@ -130,45 +126,53 @@ class HDLModuleBuilder(object):
                 case_items = []
                 for i, item in enumerate(array.items):
                     assert item.is_a(CONST)
-                    connect = AHDL_CONNECT(fname, AHDL_CONST(item.value))
+                    connect = AHDL_BLOCK(str(i), [AHDL_CONNECT(fname, AHDL_CONST(item.value))])
                     case_items.append(AHDL_CASE_ITEM(i, connect))
                 case = AHDL_CASE(input, case_items)
+                rom_func = AHDL_FUNCTION(fname, [input], [case])
             else:
+                cs_name = hdl_name + '_cs'
+                cs_sig = self.hdlmodule.signal(cs_name)
+                assert cs_sig
+                cs = AHDL_VAR(cs_sig, Ctx.LOAD)
+
                 case_items = []
                 n2o = memnode.pred_branch()
-                for i, pred in enumerate(n2o.orig_preds):
-                    assert pred.is_sink()
-                    if scope not in pred.scopes:
-                        roms.append(pred)
-                    rom_func_name = pred.sym.hdl_name()
+                for i, pred in enumerate(n2o.preds):
+                    pred_root = mrg.find_nearest_single_source(pred)
+                    assert len(pred_root.succs) == 1
+                    for romsrc in pred_root.succs[0].succs:
+                        if romsrc.is_sink():
+                            break
+                    else:
+                        assert False
+                    roms.append(romsrc)
+                    rom_func_name = romsrc.sym.hdl_name()
                     call = AHDL_FUNCALL(AHDL_SYMBOL(rom_func_name), [input])
-                    connect = AHDL_CONNECT(fname, call)
-                    case_val = '{}_cs[{}]'.format(hdl_name, i)
+                    connect = AHDL_BLOCK(str(i), [AHDL_CONNECT(fname, call)])
+                    case_val = '{}[{}]'.format(cs_name, i)
                     case_items.append(AHDL_CASE_ITEM(case_val, connect))
-                rom_sel_sig = self.hdlmodule.gen_sig(hdl_name + '_cs', len(memnode.pred_ref_nodes()))
                 case = AHDL_CASE(AHDL_SYMBOL('1\'b1'), case_items)
-                self.hdlmodule.add_internal_net(rom_sel_sig)
-            rom_func = AHDL_FUNCTION(fname, [input], [case])
+                rom_func = AHDL_FUNCTION(fname, [input, cs], [case])
             self.hdlmodule.add_function(rom_func)
 
     def _collect_vars(self, fsm):
         outputs = set()
         defs = set()
         uses = set()
-        collector = AHDLVarCollector(self.hdlmodule, defs, uses, outputs)
+        memnodes = set()
+        collector = AHDLVarCollector(self.hdlmodule, defs, uses, outputs, memnodes)
         for stg in fsm.stgs:
             for state in stg.states:
-                for code in state.traverse():
-                    collector.visit(code)
-        return defs, uses, outputs
+                collector.visit(state)
+        return defs, uses, outputs, memnodes
 
     def _collect_special_decls(self, fsm):
         edge_detectors = set()
         collector = AHDLSpecialDeclCollector(edge_detectors)
         for stg in fsm.stgs:
             for state in stg.states:
-                for code in state.traverse():
-                    collector.visit(code)
+                collector.visit(state)
         return edge_detectors
 
     def _collect_moves(self, fsm):
@@ -229,7 +233,8 @@ class HDLModuleBuilder(object):
             else:
                 self.hdlmodule.add_internal_net(sig)
 
-    def _add_reset_stms(self, fsm_name, defs, uses, outputs):
+    def _add_reset_stms(self, fsm, defs, uses, outputs):
+        fsm_name = fsm.name
         for acc in self.hdlmodule.accessors.values():
             if acc.inf.signal and acc.inf.signal.is_adaptered():
                 continue
@@ -271,19 +276,28 @@ class HDLModuleBuilder(object):
         for acc in accs:
             # reset local (SinglePort)RAM ports
             if acc.inf.signal.is_memif():
-                for stm in acc.reset_stms():
-                    self.hdlmodule.add_fsm_reset_stm(fsm_name, stm)
+                if acc.inf.signal.sym.scope is fsm.scope:
+                    for stm in acc.reset_stms():
+                        self.hdlmodule.add_fsm_reset_stm(fsm_name, stm)
+
+    def _add_mem_connections(self, scope):
+        mrg = env.memref_graph
+        HDLMemPortMaker(mrg.collect_ram(scope), scope, self.hdlmodule).make_port_all()
+        for memnode in mrg.collect_immutable(scope):
+            if memnode.is_writable():
+                HDLTuplePortMaker(memnode, scope, self.hdlmodule).make_port()
+        for memnode in mrg.collect_ram(scope):
+            if memnode.can_be_reg():
+                HDLRegArrayPortMaker(memnode, scope, self.hdlmodule).make_port()
 
 
 class HDLFunctionModuleBuilder(HDLModuleBuilder):
     def _build_module(self):
-        mrg = env.memref_graph
-
         assert len(self.hdlmodule.fsms) == 1
         fsm = self.hdlmodule.fsms[self.hdlmodule.name]
         scope = fsm.scope
         self._add_state_constants(fsm)
-        defs, uses, outputs = self._collect_vars(fsm)
+        defs, uses, outputs, memnodes = self._collect_vars(fsm)
         locals = defs.union(uses)
         self._add_state_register(fsm)
         self._add_call_interface(scope)
@@ -300,19 +314,10 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
         slave_module = AxiSlaveModule('s_axi', axi_read_infs, axi_write_infs, axi_call_inf)
         self.hdlmodule.add_sub_module('s_axi_inst', slave_module, slave_module.connections())
 
-        HDLMemPortMaker(mrg.collect_ram(scope), scope, self.hdlmodule).make_port_all()
-
-        for memnode in mrg.collect_immutable(scope):
-            if not memnode.is_writable():
-                continue
-            HDLTuplePortMaker(memnode, scope, self.hdlmodule).make_port()
-        for memnode in mrg.collect_ram(scope):
-            if memnode.can_be_reg():
-                HDLRegArrayPortMaker(memnode, scope, self.hdlmodule).make_port()
-
+        self._add_mem_connections(scope)
         self._add_submodules(scope)
-        self._add_roms(scope)
-        self._add_reset_stms(fsm.name, defs, uses, outputs)
+        self._add_roms(memnodes)
+        self._add_reset_stms(fsm, defs, uses, outputs)
 
     def _add_input_interfaces(self, scope):
         if scope.is_method():
@@ -332,25 +337,39 @@ class HDLFunctionModuleBuilder(HDLModuleBuilder):
             elif sym.typ.is_list():
                 memnode = sym.typ.get_memnode()
                 if memnode.can_be_reg():
-                    inf = RegArrayReadInterface(memnode.name(),
+                    sig = self.hdlmodule.gen_sig(memnode.name(), memnode.data_width(), sym=memnode.sym)
+                    inf = RegArrayReadInterface(sig, memnode.name(),
                                                 self.hdlmodule.name,
                                                 memnode.data_width(),
                                                 memnode.length)
                     self.hdlmodule.add_interface(inf.if_name, inf)
-                    inf = RegArrayWriteInterface('out_{}'.format(copy.name),
+                    inf = RegArrayWriteInterface(sig, 'out_{}'.format(copy.name),
                                                  self.hdlmodule.name,
                                                  memnode.data_width(),
                                                  memnode.length)
                     self.hdlmodule.add_interface(inf.if_name, inf)
                     continue
                 else:
+                    sig = self.hdlmodule.gen_sig(memnode.name(), memnode.data_width(), sym=memnode.sym)
                     if sym.typ.has_protocol() and sym.typ.get_protocol() == 'axi':
-                        inf = AxiRAMBridgeInterface(memnode.name(),
+                        len_signal = Signal("{}_len".format(sig.name), 32, {'int', 'net'})
+                        leninf = AxiSlaveInternalReadInterface(len_signal, len_signal.name, scope.orig_name)
+                        self.hdlmodule.add_interface(leninf.if_name, leninf)
+                        self.hdlmodule.add_internal_net(len_signal)
+
+                        offset_signal = Signal("{}_offset".format(sig.name), 32, {'int', 'net'})
+                        offset = AxiSlaveInternalReadInterface(offset_signal, offset_signal.name, scope.orig_name)
+                        self.hdlmodule.add_interface(offset.if_name, offset)
+                        self.hdlmodule.add_internal_net(offset_signal)
+
+                        inf = AxiRAMBridgeInterface(sig, memnode.name(),
                                                  self.hdlmodule.name,
                                                  memnode.data_width(),
-                                                 memnode.addr_width())
+                                                 memnode.addr_width(),
+                                                    )#offset_signal)
+                        sig = self.hdlmodule.signal(copy.hdl_name())
                     else:
-                        inf = RAMBridgeInterface(memnode.name(),
+                        inf = RAMBridgeInterface(sig, memnode.name(),
                                                  self.hdlmodule.name,
                                                  memnode.data_width(),
                                                  memnode.addr_width())
@@ -398,28 +417,15 @@ def accessor2module(acc):
 
 class HDLTestbenchBuilder(HDLModuleBuilder):
     def _build_module(self):
-        mrg = env.memref_graph
         assert len(self.hdlmodule.fsms) == 1
         fsm = self.hdlmodule.fsms[self.hdlmodule.name]
         scope = fsm.scope
         self._add_state_constants(fsm)
-        defs, uses, outputs = self._collect_vars(fsm)
+        defs, uses, outputs, memnodes = self._collect_vars(fsm)
         locals = defs.union(uses)
-
-        module_name = self.hdlmodule.name
         self._add_state_register(fsm)
         self._add_internal_ports(locals)
-
-        HDLMemPortMaker(mrg.collect_ram(scope), scope, self.hdlmodule).make_port_all()
-
-        for memnode in mrg.collect_immutable(scope):
-            if not memnode.is_writable():
-                continue
-            HDLTuplePortMaker(memnode, scope, self.hdlmodule).make_port()
-        for memnode in mrg.collect_ram(scope):
-            if memnode.can_be_reg():
-                HDLRegArrayPortMaker(memnode, scope, self.hdlmodule).make_port()
-
+        self._add_mem_connections(scope)
         self._add_submodules(scope)
         for sym, cp, _ in scope.params:
             if sym.typ.is_object() and sym.typ.get_scope().is_module():
@@ -427,6 +433,7 @@ class HDLTestbenchBuilder(HDLModuleBuilder):
                 sub_hdlmodule = env.hdlmodule(mod_scope)
                 self._add_submodule_instances(sub_hdlmodule, [cp.name], param_map={})
 
+        # FIXME: FIFO should be in the @module class
         for acc in self.hdlmodule.accessors.values():
             acc_mod = accessor2module(acc)
             if acc_mod:
@@ -439,8 +446,8 @@ class HDLTestbenchBuilder(HDLModuleBuilder):
                         connections[''].append((inf, inf_acc))
                 self.hdlmodule.add_sub_module(inf_acc.acc_name, acc_mod, connections, acc_mod.param_map)
 
-        self._add_roms(scope)
-        self._add_reset_stms(fsm.name, defs, uses, outputs)
+        self._add_roms(memnodes)
+        self._add_reset_stms(fsm, defs, uses, outputs)
         edge_detectors = self._collect_special_decls(fsm)
         for sig, old, new in edge_detectors:
             self.hdlmodule.add_edge_detector(sig, old, new)
@@ -467,25 +474,20 @@ class HDLTopModuleBuilder(HDLModuleBuilder):
             elif sig.is_seq_port():
                 self._add_fifo_channel(sig)
 
-    def _process_fsm(self, fsm, reset_stms):
-        mrg = env.memref_graph
+    def _process_fsm(self, fsm):
         scope = fsm.scope
-
         #self._add_state_constants(worker)
-        defs, uses, outputs = self._collect_vars(fsm)
+        defs, uses, outputs, memnodes = self._collect_vars(fsm)
         locals = defs.union(uses)
         regs, nets = self._add_internal_ports(locals)
         self._add_state_register(fsm)
-
+        self._add_mem_connections(scope)
         self._add_submodules(scope)
-        HDLMemPortMaker(mrg.collect_ram(scope), scope, self.hdlmodule).make_port_all()
-
-        for memnode in mrg.collect_ram(scope):
-            if memnode.can_be_reg():
-                HDLRegArrayPortMaker(memnode, scope, self.hdlmodule).make_port()
-
-        self._add_roms(scope)
-        self._add_reset_stms(fsm.name, defs, uses, outputs)
+        self._add_roms(memnodes)
+        inf_outputs = [inf.signal for inf in self.hdlmodule.interfaces.values()
+                       if inf.signal.is_output()]
+        outputs = set(outputs) | set(inf_outputs)
+        self._add_reset_stms(fsm, defs, uses, outputs)
         edge_detectors = self._collect_special_decls(fsm)
         for sig, old, new in edge_detectors:
             self.hdlmodule.add_edge_detector(sig, old, new)
@@ -498,24 +500,20 @@ class HDLTopModuleBuilder(HDLModuleBuilder):
 
         for fsm in self.hdlmodule.fsms.values():
             self._add_state_constants(fsm)
-
-        reset_stms = []
-        for fsm in self.hdlmodule.fsms.values():
-            if fsm.scope.is_ctor():
-                reset_stms.extend(self._collect_module_defs(fsm))
-                del self.hdlmodule.fsms[fsm.name]
-                break
-
         self._process_io(self.hdlmodule)
         self._process_connector_port(self.hdlmodule)
-
         for fsm in self.hdlmodule.fsms.values():
-            self._process_fsm(fsm, reset_stms)
-        for stm in reset_stms:
-            if stm.dst.sig.is_field():
-                assign = AHDL_ASSIGN(stm.dst, stm.src)
-                self.hdlmodule.add_static_assignment(assign, '')
-                self.hdlmodule.add_internal_net(stm.dst.sig, '')
+            self._process_fsm(fsm)
+        # remove ctor fsm and add constant parameter assigns
+        for fsm in self.hdlmodule.fsms.values():
+            if fsm.scope.is_ctor():
+                for stm in self._collect_module_defs(fsm):
+                    if stm.dst.sig.is_field():
+                        assign = AHDL_ASSIGN(stm.dst, stm.src)
+                        self.hdlmodule.add_static_assignment(assign, '')
+                        self.hdlmodule.add_internal_net(stm.dst.sig, '')
+                del self.hdlmodule.fsms[fsm.name]
+                break
 
     def _collect_module_defs(self, fsm):
         moves = self._collect_moves(fsm)
@@ -530,11 +528,12 @@ class HDLTopModuleBuilder(HDLModuleBuilder):
 
 class AHDLVarCollector(AHDLVisitor):
     '''this class collects inputs and outputs and locals'''
-    def __init__(self, hdlmodule, local_defs, local_uses, output_temps):
+    def __init__(self, hdlmodule, local_defs, local_uses, output_temps, memnodes):
         self.local_defs = local_defs
         self.local_uses = local_uses
         self.output_temps = output_temps
         self.module_constants = [c for c, _ in hdlmodule.state_constants]
+        self.memnodes = memnodes
 
     def visit_AHDL_CONST(self, ahdl):
         pass
@@ -544,6 +543,7 @@ class AHDLVarCollector(AHDLVisitor):
             self.local_defs.add(ahdl.sig)
         else:
             self.local_uses.add(ahdl.sig)
+        self.memnodes.add(ahdl.memnode)
 
     def visit_AHDL_VAR(self, ahdl):
         if ahdl.sig.is_ctrl() or ahdl.sig.name in self.module_constants:

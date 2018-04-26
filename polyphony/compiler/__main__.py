@@ -1,10 +1,11 @@
 ﻿import argparse
+import json
 import os
 import sys
 from .ahdlusedef import AHDLUseDefDetector
 from .bitwidth import BitwidthReducer
+from .bitwidth import TempVarWidthSetter
 from .builtin import builtin_symbols
-from .callgraph import CallGraphBuilder
 from .cfgopt import BlockReducer, PathExpTracer
 from .cfgopt import HyperBlockBuilder
 from .common import read_source
@@ -36,6 +37,7 @@ from .loopdetector import LoopRegionSetter
 from .loopdetector import LoopDependencyDetector
 from .memorytransform import RomDetector
 from .memref import MemRefGraphBuilder, MemInstanceGraphBuilder
+from .phiopt import PHIInlining
 from .phiresolve import PHICondResolver
 from .portconverter import PortConverter, FlattenPortList
 from .pure import interpret, PureCtorBuilder, PureFuncExecutor
@@ -45,6 +47,8 @@ from .regreducer import RegReducer
 from .regreducer import AliasVarDetector
 from .scheduler import Scheduler
 from .scope import Scope
+from .scopegraph import CallGraphBuilder
+from .scopegraph import DependencyGraphBuilder
 from .selectorbuilder import SelectorBuilder
 from .setlineno import LineNumberSetter, SourceDump
 from .specfunc import SpecializedFunctionMaker
@@ -95,6 +99,14 @@ def is_not_static_scope(scope):
     return not is_static_scope(scope)
 
 
+def is_uninlined_scope(scope):
+    if is_static_scope(scope):
+        return False
+    if scope.is_ctor() and not scope.parent.is_module():
+        return False
+    return True
+
+
 def is_hdlmodule_scope(scope):
     return (scope.is_module() and scope.is_instantiated()) or scope.is_function_module() or scope.is_testbench()
 
@@ -109,11 +121,20 @@ def preprocess_global(driver):
         src_dump.process(s)
 
 
-def callgraph(driver):
-    unused_scopes = CallGraphBuilder().process_all()
-    for s in unused_scopes:
+def scopegraph(driver):
+    uncalled_scopes = CallGraphBuilder().process_all()
+    unused_scopes = DependencyGraphBuilder().process_all()
+    for s in uncalled_scopes:
+        if s.is_namespace() or s.is_class() or s.is_ctor() or s.is_worker():
+            continue
         driver.remove_scope(s)
         Scope.destroy(s)
+    for s in unused_scopes:
+        if s.is_namespace():
+            continue
+        if s.name in env.scopes:
+            driver.remove_scope(s)
+            Scope.destroy(s)
 
 
 def iftrans(driver, scope):
@@ -284,7 +305,7 @@ def instantiate(driver):
             if not (child.is_ctor() or child.is_worker()):
                 continue
             usedef(driver, child)
-            if env.enable_pure:
+            if env.config.enable_pure:
                 execpure(driver, child)
             constopt(driver, child)
             checkcfg(driver, child)
@@ -298,11 +319,11 @@ def instantiate(driver):
 
         assert worker.is_worker()
         usedef(driver, worker)
-        if env.enable_pure:
+        if env.config.enable_pure:
             execpure(driver, worker)
         constopt(driver, worker)
         checkcfg(driver, worker)
-    callgraph(driver)
+    scopegraph(driver)
     detectrom(driver)
 
 
@@ -314,8 +335,8 @@ def specfunc(driver):
 
 
 def inlineopt(driver):
-    InlineOpt().process_all()
-    callgraph(driver)
+    InlineOpt().process_all(driver)
+    scopegraph(driver)
 
 
 def setsynthparams(driver, scope):
@@ -340,7 +361,11 @@ def scalarize(driver, scope):
 
 
 def staticconstopt(driver):
-    StaticConstOpt().process_all(driver)
+    scopes = driver.get_scopes(bottom_up=True,
+                               with_global=True,
+                               with_class=True,
+                               with_lib=False)
+    StaticConstOpt().process_scopes(scopes)
 
 
 def earlyconstopt_nonssa(driver, scope):
@@ -360,6 +385,10 @@ def constopt(driver, scope):
 
 def copyopt(driver, scope):
     CopyOpt().process(scope)
+
+
+def phiopt(dfiver, scope):
+    PHIInlining().process(scope)
 
 
 def checkcfg(driver, scope):
@@ -400,6 +429,10 @@ def deadcode(driver, scope):
 
 def aliasvar(driver, scope):
     AliasVarDetector().process(scope)
+
+
+def tempbit(driver, scope):
+    TempVarWidthSetter().process(scope)
 
 
 def dfg(driver, scope):
@@ -456,6 +489,10 @@ def buildmodule(driver, scope):
     modulebuilder = HDLModuleBuilder.create(hdlmodule)
     assert modulebuilder
     modulebuilder.process(hdlmodule)
+
+
+def buildselector(driver, scope):
+    hdlmodule = env.hdlmodule(scope)
     SelectorBuilder().process(hdlmodule)
 
 
@@ -537,7 +574,7 @@ def compile_plan():
         return proc if env.enable_ahdl_opt else None
 
     def pure(proc):
-        return proc if env.enable_pure else None
+        return proc if env.config.enable_pure else None
 
     plan = [
         preprocess_global,
@@ -566,16 +603,18 @@ def compile_plan():
         typeprop,
         dbg(dumpscope),
         latequadruple,
-        callgraph,
+        scopegraph,
         earlyrestrictioncheck,
         typecheck,
         flattenport,
         typeprop,
         restrictioncheck,
         phase(env.PHASE_1),
+        usedef,
         earlyconstopt_nonssa,
         dbg(dumpscope),
         inlineopt,
+        filter_scope(is_uninlined_scope),
         setsynthparams,
         dbg(dumpscope),
         reduceblk,
@@ -599,6 +638,7 @@ def compile_plan():
         dbg(dumpscope),
         usedef,
         copyopt,
+        phiopt,
         dbg(dumpscope),
         usedef,
         memrefgraph,
@@ -639,6 +679,7 @@ def compile_plan():
         phase(env.PHASE_5),
         usedef,
         aliasvar,
+        tempbit,
         dbg(dumpscope),
         dfg,
         synthcheck,
@@ -664,6 +705,7 @@ def compile_plan():
         dbg(dumpmodule),
         reducestate,
         dbg(dumpmodule),
+        buildselector,
         genhdl,
         dbg(dumphdl),
         dbg(printresouces),
@@ -673,12 +715,23 @@ def compile_plan():
 
 
 def setup(src_file, options):
+    import glob
     env.__init__()
     env.dev_debug_mode = options.debug_mode
     env.verbose_level = options.verbose_level if options.verbose_level else 0
     env.quiet_level = options.quiet_level if options.quiet_level else 0
     env.enable_verilog_dump = options.verilog_dump
     env.enable_verilog_monitor = options.verilog_monitor
+    if options.config:
+        try:
+            if os.path.exists(options.config):
+                with open(options.config, 'r') as f:
+                    config = json.load(f)
+            else:
+                config = json.loads(options.config)
+            env.load_config(config)
+        except:
+            print('invalid config option', options.config)
     if env.dev_debug_mode:
         logging.basicConfig(**logging_setting)
 
@@ -687,29 +740,43 @@ def setup(src_file, options):
         os.path.dirname(__file__),
         os.path.sep, os.path.pardir
     )
-    package_file = os.path.abspath(internal_root_dir + '_builtins.py')
-    env.set_current_filename(package_file)
-    translator.translate(read_source(package_file), '__builtin__')
-    package_file = os.path.abspath(internal_root_dir + '_polyphony.py')
-    env.set_current_filename(package_file)
-    translator.translate(read_source(package_file), 'polyphony')
-    for name in ('_typing', '_io', '_timing'):
-        package_file = os.path.abspath(internal_root_dir + name + '.py')
+    internal_root_dir = os.path.abspath(internal_root_dir) + os.path.sep
+
+    builtin_package_file = internal_root_dir + '_builtins.py'
+    env.set_current_filename(builtin_package_file)
+    translator.translate(read_source(builtin_package_file), '__builtin__')
+
+    polyphony_package_file = internal_root_dir + '_polyphony.py'
+    env.set_current_filename(polyphony_package_file)
+    translator.translate(read_source(polyphony_package_file), 'polyphony')
+
+    package_files = glob.glob(f'{internal_root_dir}_[a-z]*')
+    package_files.remove(builtin_package_file)
+    package_files.remove(polyphony_package_file)
+
+    for package_file in package_files:
         package_name = os.path.basename(package_file).split('.')[0]
         package_name = package_name[1:]
         env.set_current_filename(package_file)
         translator.translate(read_source(package_file), package_name)
+
     env.set_current_filename(src_file)
     g = Scope.create_namespace(None, env.global_scope_name, {'global'})
     env.push_outermost_scope(g)
     for sym in builtin_symbols.values():
         g.import_sym(sym)
 
+    scopes = Scope.get_scopes(with_global=False, with_class=True, with_lib=True)
+    static_lib_scopes = [s for s in scopes
+                         if s.name.startswith('polyphony') and
+                         (s.is_namespace() or s.is_class())]
+    StaticConstOpt().process_scopes(static_lib_scopes)
+
 
 def compile(plan, source, src_file=''):
     translator = IRTranslator()
     translator.translate(source, '')
-    if env.enable_pure:
+    if env.config.enable_pure:
         interpret(source, src_file)
     scopes = Scope.get_scopes(bottom_up=False, with_global=True, with_class=True)
     driver = Driver(plan, scopes)
@@ -765,6 +832,8 @@ def main():
                         metavar='FILE')
     parser.add_argument('-d', '--dir', dest='output_dir',
                         metavar='DIR', help='output directory')
+    parser.add_argument('-c', '--config', dest='config',
+                        metavar='CONFIG', help='set configration(json literal or file)')
     parser.add_argument('-v', '--verbose', dest='verbose_level',
                         action='count', help='verbose output')
     parser.add_argument('-D', '--debug', dest='debug_mode',

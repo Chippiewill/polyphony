@@ -1,8 +1,8 @@
 from collections import defaultdict
 from .common import error_info
-from .common import fail
+from .common import fail, warn
 from .env import env
-from .errors import Errors
+from .errors import Errors, Warnings
 from .scope import Scope
 from .ir import CONST, TEMP, MOVE
 from .irvisitor import IRVisitor, IRTransformer
@@ -19,20 +19,21 @@ class PortTypeProp(TypePropagation):
             for (_, a), p in zip(ir.args, ctor.params[1:]):
                 if a.is_a(CONST):
                     if p.copy.name == 'direction':
-                        attrs[p.copy.name] = self._normalize_direction(a.value)
+                        di = self._normalize_direction(a.value)
+                        if not di:
+                            fail(self.current_stm,
+                                 Errors.UNKNOWN_X_IS_SPECIFIED,
+                                 ['direction', a.value])
+                        attrs[p.copy.name] = di
                     else:
                         attrs[p.copy.name] = a.value
                 elif a.is_a(TEMP) and a.symbol().typ.is_class():
                     attrs[p.copy.name] = a.symbol().typ.name
                 else:
                     fail(self.current_stm, Errors.PORT_PARAM_MUST_BE_CONST)
-                    print(error_info(self.scope, ir.lineno))
-                    raise RuntimeError('')
-
             assert len(ir.func_scope().type_args) == 1
+            assert 'direction' in attrs
             attrs['dtype'] = ir.func_scope().type_args[0]
-            if 'direction' not in attrs or attrs['direction'] == 'auto':
-                attrs['direction'] = '?'
             attrs['root_symbol'] = self.current_stm.dst.symbol()
             if self.current_stm.is_a(MOVE) and self.current_stm.dst.is_a(TEMP):
                 attrs['port_kind'] = 'internal'
@@ -50,18 +51,14 @@ class PortTypeProp(TypePropagation):
             ir.func_scope().return_type = port_typ
         return ir.func_scope().return_type
 
-    def _set_type(self, sym, typ):
-        if sym.typ.is_object() and sym.typ.get_scope().is_port() and typ.is_port():
-            sym.set_type(typ)
-
     def _normalize_direction(self, di):
         if di == 'in' or di == 'input' or di == 'i':
             return 'input'
         elif di == 'out' or di == 'output' or di == 'o':
             return 'output'
-        elif di == 'any':
+        elif di == 'any' or not di:
             return 'any'
-        return '?'
+        return ''
 
     def visit_CALL(self, ir):
         if ir.func_scope().is_method() and ir.func_scope().parent.is_port():
@@ -87,6 +84,8 @@ class PortTypeProp(TypePropagation):
 class PortConverter(IRTransformer):
     def __init__(self):
         super().__init__()
+        self.writers = defaultdict(set)
+        self.readers = defaultdict(set)
 
     def process_all(self):
         scopes = Scope.get_scopes(with_class=True)
@@ -102,7 +101,7 @@ class PortConverter(IRTransformer):
             typeprop.process(ctor)
             for w, args in m.workers:
                 typeprop.process(w)
-            for caller in env.call_graph.preds(m):
+            for caller in env.depend_graph.preds(m):
                 if caller.is_namespace():
                     continue
                 typeprop.process(caller)
@@ -111,41 +110,38 @@ class PortConverter(IRTransformer):
             self.process(ctor)
             for w, args in m.workers:
                 self.process(w)
-            for caller in env.call_graph.preds(m):
+            for caller in env.depend_graph.preds(m):
                 if caller.is_namespace():
                     continue
                 self.process(caller)
 
+            # check for instance variable port
             for field in m.class_fields().values():
-                if field.typ.is_port() and field.typ.get_direction() == '?':
-                    if not env.call_graph.preds(m):
+                if field.typ.is_port() and field not in self.readers and field not in self.writers:
+                    if not env.depend_graph.preds(m):
                         continue
                     assert ctor.usedef
                     stm = ctor.usedef.get_stms_defining(field).pop()
-                    fail(stm, Errors.PORT_IS_NOT_USED,
+                    warn(stm, Warnings.PORT_IS_NOT_USED,
                          [field.orig_name()])
+            # check for local variable port
             for sym in ctor.symbols.values():
-                if sym.typ.is_port() and sym.typ.get_direction() == '?':
-
+                if sym.typ.is_port() and sym not in self.readers and sym not in self.writers:
                     assert ctor.usedef
                     stms = ctor.usedef.get_stms_defining(sym)
                     # This symbol might not be used (e.g. ancestor symbol),
                     # so we have to check if its definition statement exists.
                     if stms:
-                        fail(stms.pop(), Errors.PORT_IS_NOT_USED,
+                        warn(list(stms)[0], Warnings.PORT_IS_NOT_USED,
                              [sym.orig_name()])
 
     def _set_and_check_port_direction(self, expected_di, sym):
         port_typ = sym.typ
-        if not port_typ.has_direction():
-            port_typ.set_direction('?')
+        rootsym = port_typ.get_root_symbol()
         di = port_typ.get_direction()
         kind = port_typ.get_port_kind()
         if kind == 'external':
-            if di == '?':
-                port_typ.set_direction(expected_di)
-                port_typ.freeze()
-            elif di == 'any':
+            if di == 'any':
                 port_typ.set_port_kind('internal')
                 port_typ.set_direction('inout')
             elif di != expected_di:
@@ -158,30 +154,42 @@ class PortConverter(IRTransformer):
                     fail(self.current_stm, Errors.DIRECTION_IS_CONFLICTED,
                          [sym.orig_name()])
         elif kind == 'internal':
-            port_typ.set_direction('inout')
+            if self.scope.is_worker():
+                port_typ.set_direction('inout')
+            else:
+                fail(self.current_stm, Errors.DIRECTION_IS_CONFLICTED,
+                     [sym.orig_name()])
 
         if expected_di == 'output':
             # write-write conflict
-            if port_typ.has_writer():
-                writer = port_typ.get_writer()
+            if self.writers[rootsym]:
+                assert len(self.writers[rootsym]) == 1
+                writer = list(self.writers[rootsym])[0]
                 if writer is not self.scope and writer.worker_owner is self.scope.worker_owner:
                     fail(self.current_stm, Errors.WRITING_IS_CONFLICTED,
                          [sym.orig_name()])
             else:
                 if kind == 'internal':
                     assert self.scope.is_worker() or self.scope.parent.is_module()
-                port_typ.set_writer(self.scope)
-        elif expected_di == 'input' and port_typ.get_scope().name.startswith('polyphony.io.Queue'):
+                self.writers[rootsym].add(self.scope)
+        elif expected_di == 'input':
             # read-read conflict
-            if port_typ.has_reader():
-                reader = port_typ.get_reader()
-                if reader is not self.scope and reader.worker_owner is self.scope.worker_owner:
-                    fail(self.current_stm, Errors.READING_IS_CONFLICTED,
-                         [sym.orig_name()])
+            if self.readers[rootsym]:
+                if all([s.is_testbench() for s in self.readers[rootsym]]):
+                    if self.scope.is_testbench():
+                        self.readers[rootsym].add(self.scope)
+                elif port_typ.get_scope().name.startswith('polyphony.io.Port') and port_typ.get_protocol() == 'none':
+                    pass
+                else:
+                    assert len(self.readers[rootsym]) == 1
+                    reader = list(self.readers[rootsym])[0]
+                    if reader is not self.scope and reader.worker_owner is self.scope.worker_owner:
+                        fail(self.current_stm, Errors.READING_IS_CONFLICTED,
+                             [sym.orig_name()])
             else:
                 if kind == 'internal':
                     assert self.scope.is_worker() or self.scope.parent.is_module()
-                port_typ.set_reader(self.scope)
+                self.readers[rootsym].add(self.scope)
 
     def _get_port_owner(self, sym):
         assert sym.typ.is_port()
@@ -192,10 +200,16 @@ class PortConverter(IRTransformer):
             return root.scope
 
     def _check_port_direction(self, sym, func_scope):
-        if func_scope.orig_name == 'wr':
-            expected_di = 'output'
+        if func_scope.name.startswith('polyphony.io.Queue'):
+            if func_scope.orig_name in ('wr', 'full'):
+                expected_di = 'output'
+            else:
+                expected_di = 'input'
         else:
-            expected_di = 'input'
+            if func_scope.orig_name == 'wr':
+                expected_di = 'output'
+            else:
+                expected_di = 'input'
         port_owner = self._get_port_owner(sym)
         if ((self.scope.is_worker() and not self.scope.worker_owner.is_subclassof(port_owner)) or
                 not self.scope.is_worker()):
@@ -235,7 +249,6 @@ class PortConverter(IRTransformer):
                 kind = port.get_port_kind()
                 if kind == 'external':
                     port_owner = self._get_port_owner(p.symbol())
-                    assert di != '?'
                     #port.set_direction('input')
                     #port.freeze()
                     if ((self.scope.is_worker() and not self.scope.worker_owner.is_subclassof(port_owner)) or

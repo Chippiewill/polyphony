@@ -23,7 +23,14 @@ def interpret(source, file_name=''):
     objs = {}
     rtinfo = RuntimeInfo()
     builder = RuntimeInfoBuilder(rtinfo)
-
+    # We have to save the environment to avoid any import side-effect by the interpreter
+    saved_sys_path = sys.path
+    saved_sys_modules = sys.modules
+    sys.path = sys.path.copy()
+    sys.modules = sys.modules.copy()
+    if file_name:
+        dir_name = os.path.dirname(file_name)
+        sys.path.append(dir_name)
     threading.setprofile(builder._profile_func)
     thread = threading.Thread(target=_do_interpret, args=(source, file_name, objs))
     thread.start()
@@ -55,12 +62,11 @@ def interpret(source, file_name=''):
     _namespaces['__main__'] = _vars['__main__']
     rtinfo.global_vars = _namespaces
     env.runtime_info = rtinfo
+    sys.path = saved_sys_path
+    sys.modules = saved_sys_modules
 
 
 def _do_interpret(source, file_name, objs):
-    if file_name:
-        dir_name = os.path.dirname(file_name)
-        sys.path.append(dir_name)
     code = compile(source, file_name, 'exec')
     th = threading.current_thread()
     th.exc_info = None
@@ -445,7 +451,7 @@ class PureCtorBuilder(object):
                 klass_scope_sym = klass_scope.parent.gen_sym(klass_scope.orig_name)
                 klass_scope_sym.set_type(Type.klass(klass_scope))
                 sym = module.add_sym(name)
-                sym.set_type(typ)
+                sym.set_type(typ.clone())
                 orig_obj = instance.__dict__[name]
                 calls = env.runtime_info.get_internal_calls(instance)
                 for cname, cself, cargs in calls:
@@ -557,7 +563,7 @@ class PureCtorBuilder(object):
         port_qualname = port.__module__ + '.' + port.__class__.__name__
         port_scope = env.scopes[port_qualname]
         port_scope_sym = port_scope.parent.gen_sym(port_scope.orig_name)
-        port_scope_sym.typ = Type.klass(port_scope)
+        port_scope_sym.set_type(Type.klass(port_scope))
         return NEW(port_scope_sym, args, kwargs={})
 
     def _port2ir(self, port_obj, instance, module, ctor):
@@ -682,7 +688,7 @@ class PureFuncExecutor(ConstantOptBase):
     def visit_CALL(self, ir):
         if not ir.func_scope().is_pure():
             return ir
-        assert env.enable_pure
+        assert env.config.enable_pure
         assert ir.func_scope().parent.is_global()
         args = self._args2tuple([arg for _, arg in ir.args])
         if args is None:

@@ -23,7 +23,8 @@ class AliasVarDetector(IRVisitor):
             if src_sym.is_param() or src_sym.typ.is_port():
                 return
         elif ir.src.is_a(CALL):
-            return
+            if not ir.src.func_scope().is_predicate():
+                return
         elif ir.src.is_a(MREF):
             memnode = ir.src.mem.symbol().typ.get_memnode()
             if memnode.is_immutable() or not memnode.is_writable():
@@ -43,7 +44,9 @@ class AliasVarDetector(IRVisitor):
 
     def visit_PHI(self, ir):
         sym = ir.var.symbol()
-        if sym.typ.is_seq() or sym.is_return() or sym.typ.is_port():
+        if sym.is_return() or sym.typ.is_port():
+            return
+        if sym.typ.is_seq() and sym.typ.get_memnode().can_be_reg():
             return
         if any([sym is a.symbol() for a in ir.args if a.is_a(TEMP)]):
             return
@@ -51,7 +54,9 @@ class AliasVarDetector(IRVisitor):
 
     def visit_UPHI(self, ir):
         sym = ir.var.symbol()
-        if sym.typ.is_seq() or sym.is_return() or sym.typ.is_port():
+        if sym.is_return() or sym.typ.is_port():
+            return
+        if sym.typ.is_seq() and sym.typ.get_memnode().can_be_reg():
             return
         if any([sym is a.symbol() for a in ir.args if a.is_a(TEMP)]):
             return

@@ -24,8 +24,8 @@ class SelectorBuilder(object):
                 if len(ic.ins) == 1:
                     self._to_one2n_interconnect(ic.name, ic.ins[0], ic.outs)
                 elif len(ic.outs) == 1:
-                    self._to_n2one_interconnect(ic.name, ic.ins, ic.outs[0], ic.cs_name)
-        self._convert_mem_switch_to_mem_mux()
+                    self._to_n2one_interconnect(ic.name, ic.ins, ic.outs[0])
+        #self._convert_mem_switch_to_mem_mux()
 
     def _to_direct_connect(self, name, inif, outif):
         tag = name
@@ -112,7 +112,7 @@ class SelectorBuilder(object):
                                           defval=defval)
                     self.hdlmodule.add_demux(selector, tag)
 
-    def _to_n2one_interconnect(self, name, inifs, outif, cs_name):
+    def _to_n2one_interconnect(self, name, inifs, outif):
         tag = name
         trunk = {}
         branches = defaultdict(list)
@@ -128,9 +128,22 @@ class SelectorBuilder(object):
         switch_var = AHDL_VAR(switch, Ctx.STORE)
         self.hdlmodule.add_internal_net(switch, tag)
 
+        assert outif.inf.signal.sym
+        assert outif.inf.signal.sym.typ.is_list()
+        memnode = outif.inf.signal.sym.typ.get_memnode()
         cs_width = len(inifs)
-        cs_sig = self.hdlmodule.gen_sig('{}_cs'.format(cs_name), cs_width)
-        self.hdlmodule.add_internal_net(cs_sig, tag)
+        if memnode.is_switch():
+            cs_sig = self.hdlmodule.gen_sig('{}_cs'.format(name), cs_width, {'reg'})
+            self.hdlmodule.add_internal_reg(cs_sig, tag)
+            mv = AHDL_MOVE(AHDL_VAR(cs_sig, Ctx.STORE), AHDL_SYMBOL("{}'b0".format(cs_width)))
+            if self.hdlmodule is env.hdlmodule(memnode.scope):
+                fsm_name = memnode.scope.orig_name
+            else:
+                fsm_name = memnode.pred_branch().preds[0].scope.orig_name
+            self.hdlmodule.add_fsm_reset_stm(fsm_name, mv)
+        else:
+            cs_sig = self.hdlmodule.gen_sig('{}_cs'.format(name), cs_width, {'net'})
+            self.hdlmodule.add_internal_net(cs_sig, tag)
 
         cs_var = AHDL_VAR(cs_sig, Ctx.LOAD)
         assign = AHDL_ASSIGN(switch_var, cs_var)
@@ -214,6 +227,20 @@ class SelectorBuilder(object):
                 src_var = AHDL_MEMVAR(src_sig, src_node, Ctx.LOAD)
                 conds.append(cond)
                 src_vars.append(src_var)
-                state.codes.remove(memsw)
+                self._remove_code(state, memsw)
             memmux = AHDL_META('MEM_MUX', memsw.args[0], dst_var, src_vars, conds)
             state.codes.insert(0, memmux)
+
+    def _remove_code(self, state, code):
+        if code in state.codes:
+            state.codes.remove(code)
+            return True
+        for c in state.codes:
+            if hasattr(c, 'codes'):
+                if self._remove_code(c, code):
+                    return True
+            elif hasattr(c, 'blocks'):
+                for blk in c.blocks:
+                    if self._remove_code(c, code):
+                        return True
+        return False

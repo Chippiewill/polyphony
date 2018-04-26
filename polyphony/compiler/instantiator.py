@@ -17,7 +17,7 @@ def bind_val(scope, i, value):
 
 class EarlyWorkerInstantiator(object):
     def process_all(self):
-        assert env.enable_pure
+        assert env.config.enable_pure
         new_workers = set()
         orig_workers = set()
         for name, inst in env.runtime_info.module_instances.items():
@@ -97,7 +97,7 @@ class EarlyWorkerInstantiator(object):
 
 class EarlyModuleInstantiator(object):
     def process_all(self):
-        assert env.enable_pure
+        assert env.config.enable_pure
         new_modules = set()
         for name, inst in env.runtime_info.module_instances.items():
             new_module, orig_module = self._instantiate_module(name, inst)
@@ -327,8 +327,9 @@ class MemnodeReplacer(IRVisitor):
     def _replace_typ_memnode(self, typ):
         if typ.is_seq() and typ not in self.replaced:
             memnode = typ.get_memnode()
-            new_memnode = self.node_map[memnode]
-            typ.set_memnode(new_memnode)
+            if memnode in self.node_map: # TODO: to be always true
+                new_memnode = self.node_map[memnode]
+                typ.set_memnode(new_memnode)
             self.replaced.add(typ)
 
     def visit_TEMP(self, ir):

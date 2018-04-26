@@ -378,30 +378,30 @@ class AHDL_SEQ(AHDL_STM):
 class AHDL_IF(AHDL_STM):
     # ([cond], [code]) => if (cond) code
     # ([cond, None], [code1, code2]) => if (cond) code1 else code2
-    def __init__(self, conds, codes_list):
+    def __init__(self, conds, blocks):
         super().__init__()
         self.conds = conds
-        self.codes_list = codes_list
-        assert len(conds) == len(codes_list)
+        self.blocks = blocks
+        assert len(conds) == len(blocks)
         assert conds[0]
 
     def __str__(self):
         s = 'if {}\n'.format(self.conds[0])
-        for code in self.codes_list[0]:
+        for code in self.blocks[0].codes:
             s += '    {}\n'.format(code)
-        for cond, codes in zip(self.conds[1:], self.codes_list[1:]):
+        for cond, ahdlblk in zip(self.conds[1:], self.blocks[1:]):
             if cond:
                 s += '  elif {}\n'.format(cond)
-                for code in codes:
+                for code in ahdlblk.codes:
                     s += '    {}\n'.format(code)
             else:
                 s += '  else\n'
-                for code in self.codes_list[-1]:
+                for code in ahdlblk.codes:
                     s += '    {}'.format(code)
         return s
 
     def __repr__(self):
-        return 'AHDL_IF({}, {})'.format(repr(self.conds), repr(self.codes_list))
+        return 'AHDL_IF({}, {})'.format(repr(self.conds), repr(self.blocks))
 
 
 class AHDL_IF_EXP(AHDL_EXP):
@@ -429,6 +429,7 @@ class AHDL_MODULECALL(AHDL_STM):
         self.args = args
         self.instance_name = instance_name
         self.prefix = prefix
+        self.returns = []
 
     def __str__(self):
         return '{}({})'.format(self.instance_name, ', '.join([str(arg) for arg in self.args]))
@@ -458,7 +459,6 @@ class AHDL_CALLEE_EPILOG(AHDL_STM):
 
 class AHDL_FUNCALL(AHDL_EXP):
     def __init__(self, name, args):
-        assert isinstance(name, AHDL_SYMBOL)
         super().__init__()
         self.name = name
         self.args = args
@@ -491,6 +491,12 @@ class AHDL_META(AHDL_STM):
         self.args = list(args[1:])
 
     def __str__(self):
+        if self.metaid == 'MEM_SWITCH':
+            return '{}({}, {} <= {})'.format(self.metaid, self.args[0], self.args[1].name(), self.args[2].name())
+        elif self.metaid == 'MEM_MUX':
+            _, dst, srcs, conds = self.args
+            items = ['{}?{}'.format(c, s) for c, s in zip(conds, srcs)]
+            return '{}({} = {})'.format(self.metaid, dst, ', '.join(items))
         return '{}({})'.format(self.metaid, ', '.join([str(arg) for arg in self.args]))
 
     def __repr__(self):
@@ -507,7 +513,13 @@ class AHDL_META_WAIT(AHDL_STM):
         self.transition = None
 
     def __str__(self):
-        s = '{}({})'.format(self.metaid, ', '.join([str(arg) for arg in self.args]))
+        items = []
+        for arg in self.args:
+            if isinstance(arg, (list, tuple)):
+                items.append(', '.join([str(a) for a in arg]))
+            else:
+                items.append(str(arg))
+        s = '{}({})'.format(self.metaid, ', '.join(items))
         if self.codes:
             s += '\n'
             s += '\n'.join(['  {}'.format(code) for code in self.codes])
@@ -627,10 +639,10 @@ class AHDL_CASE(AHDL_STM):
 
 
 class AHDL_CASE_ITEM(AHDL_STM):
-    def __init__(self, val, stm):
+    def __init__(self, val, block):
         super().__init__()
         self.val = val
-        self.stm = stm
+        self.block = block
 
     def __str__(self):
         return '{}:{}'.format(self.val, str(self.stm))
@@ -648,16 +660,37 @@ class AHDL_TRANSITION(AHDL_STM):
 
 
 class AHDL_TRANSITION_IF(AHDL_IF):
-    def __init__(self, conds, codes_list):
-        super().__init__(conds, codes_list)
+    def __init__(self, conds, blocks):
+        super().__init__(conds, blocks)
 
     def __repr__(self):
-        return 'AHDL_TRANSITION_IF({}, {})'.format(repr(self.conds), repr(self.codes_list))
+        return 'AHDL_TRANSITION_IF({}, {})'.format(repr(self.conds), repr(self.blocks))
 
 
 class AHDL_PIPELINE_GUARD(AHDL_IF):
     def __init__(self, cond, codes):
-        super().__init__([cond], [codes])
+        super().__init__([cond], [AHDL_BLOCK('', codes)])
 
     def __repr__(self):
-        return 'AHDL_PIPELINE_GUARD({}, {})'.format(repr(self.conds), repr(self.codes_list))
+        return 'AHDL_PIPELINE_GUARD({}, {})'.format(repr(self.conds), repr(self.blocks))
+
+
+class AHDL_BLOCK(AHDL):
+    def __init__(self, name, codes):
+        self.name = name
+        self.codes = codes
+
+    def __str__(self):
+        return 'AHDL_BLOCK begin\n' + ('\n'.join([str(c) for c in self.codes])) + 'AHDL_BLOCK end'
+
+    def __repr__(self):
+        return 'AHDL_BLOCK({})'.format(', '.join([repr(c) for c in self.codes]))
+
+    def traverse(self):
+        codes = []
+        for c in self.codes:
+            if c.is_a(AHDL_BLOCK):
+                codes.extend(c.traverse())
+            else:
+                codes.append(c)
+        return codes

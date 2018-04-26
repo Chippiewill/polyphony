@@ -225,6 +225,18 @@ class SchedulerImpl(object):
         if not ret:
             assert False, 'scheduling has failed. the cycle must be greater equal {}'.format(actual)
 
+    def _max_latency(self, paths):
+        max_latency = 0
+        for path in paths:
+            path_latencies = []
+            for n in path:
+                m, _, _ = self.node_latency_map[n]
+                path_latencies.append(m)
+            path_latency = sum(path_latencies)
+            if path_latency > max_latency:
+                max_latency = path_latency
+        return max_latency
+
     def _remove_alias_if_needed(self, dfg):
         for n in dfg.nodes:
             if n not in self.node_latency_map:
@@ -315,6 +327,7 @@ class BlockBoundedListScheduler(SchedulerImpl):
     def _node_sched_with_block_bound(self, dfg, node, block):
         preds = dfg.preds_without_back(node)
         preds = [p for p in preds if p.tag.block is block]
+        logger.debug('scheduling for ' + str(node))
         if preds:
             defuse_preds = dfg.preds_typ_without_back(node, 'DefUse')
             defuse_preds = [p for p in defuse_preds if p.tag.block is block]
@@ -325,18 +338,24 @@ class BlockBoundedListScheduler(SchedulerImpl):
             sched_times = []
             if seq_preds:
                 latest_node = max(seq_preds, key=lambda p: p.end)
+                logger.debug('latest_node of seq_preds ' + str(latest_node))
                 if node.tag.is_a([JUMP, CJUMP, MCJUMP]) or has_exclusive_function(node.tag):
                     sched_times.append(latest_node.end)
                 else:
                     seq_latency = self.node_seq_latency_map[latest_node]
                     sched_times.append(latest_node.begin + seq_latency)
+                    logger.debug('schedtime ' + str(latest_node.begin + seq_latency))
             if defuse_preds:
                 latest_node = max(defuse_preds, key=lambda p: p.end)
+                logger.debug('latest_node of defuse_preds ' + str(latest_node))
                 sched_times.append(latest_node.end)
+                logger.debug('schedtime ' + str(latest_node.end))
             if usedef_preds:
                 preds = [self._find_latest_alias(dfg, pred) for pred in usedef_preds]
-                latest_node = max(preds, key=lambda p: p.end)
+                latest_node = max(preds, key=lambda p: p.begin)
+                logger.debug('latest_node(begin) of usedef_preds ' + str(latest_node))
                 sched_times.append(latest_node.begin)
+                logger.debug('schedtime ' + str(latest_node.begin))
             if not sched_times:
                 latest_node = max(preds, key=lambda p: p.begin)
                 sched_times.append(latest_node.begin)
@@ -373,9 +392,14 @@ class PipelineScheduler(SchedulerImpl):
             for path in dfg.trace_all_paths(lambda n: dfg.succs_typ_without_back(n, 'DefUse')):
                 self.all_paths.append(path)
         induction_paths = self._find_induction_paths(self.all_paths)
-        ret, actual = self._adjust_latency(induction_paths, initiation_interval)
-        if not ret:
-            assert False, 'scheduling of II has failed'
+        if initiation_interval < 0:
+            latency = self._max_latency(induction_paths)
+            dfg.ii = latency if latency > 0 else 1
+        else:
+            ret, actual = self._adjust_latency(induction_paths, initiation_interval)
+            if not ret:
+                assert False, 'scheduling of II has failed'
+            dfg.ii = actual
 
     def _find_induction_paths(self, paths):
         induction_paths = []
@@ -498,25 +522,6 @@ class ResourceExtractor(IRVisitor):
     def visit_NEW(self, ir):
         self.visit_args(ir.args)
 
-    def visit_CONST(self, ir):
-        pass
-
-    def visit_MREF(self, ir):
-        assert ir.mem.is_a(TEMP) or ir.mem.is_a(ATTR)
-        assert ir.offset.is_a([TEMP, CONST, UNOP])
-
-    def visit_MSTORE(self, ir):
-        assert ir.mem.is_a(TEMP) or ir.mem.is_a(ATTR)
-        assert ir.offset.is_a([TEMP, CONST])
-        assert ir.exp.is_a([TEMP, CONST])
-
-    def visit_ARRAY(self, ir):
-        for item in ir.items:
-            assert item.is_a([TEMP, CONST])
-
-    def visit_TEMP(self, ir):
-        pass
-
     def visit_EXPR(self, ir):
         self.visit(ir.exp)
 
@@ -527,15 +532,6 @@ class ResourceExtractor(IRVisitor):
         for cond in ir.conds:
             self.visit(cond)
 
-    def visit_JUMP(self, ir):
-        pass
-
-    def visit_RET(self, ir):
-        pass
-
     def visit_MOVE(self, ir):
         self.visit(ir.src)
         self.visit(ir.dst)
-
-    def visit_PHI(self, ir):
-        pass

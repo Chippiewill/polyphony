@@ -9,7 +9,7 @@ from .symbol import Symbol
 from .synth import make_synth_params
 from .type import Type
 from .irvisitor import IRVisitor
-from .ir import JUMP, CJUMP, MCJUMP, PHIBase
+from .ir import CONST, JUMP, CJUMP, MCJUMP, PHIBase
 from .signal import Signal
 from logging import getLogger
 logger = getLogger(__name__)
@@ -22,7 +22,7 @@ class Scope(Tagged):
     ordered_scopes = []
     TAGS = {
         'global', 'function', 'class', 'method', 'ctor',
-        'callable', 'returnable', 'mutable', 'inherited',
+        'callable', 'returnable', 'mutable', 'inherited', 'predicate',
         'testbench', 'pure',
         'module', 'worker', 'instantiated',
         'lib', 'namespace', 'builtin', 'decorator',
@@ -53,15 +53,16 @@ class Scope(Tagged):
         namespace = Scope.create(parent, name, tags, lineno=1)
         namesym = namespace.add_sym('__name__')
         namesym.set_type(Type.str_t)
+        if namespace.is_global():
+            namespace.constants[namesym] = CONST('__main__')
+        else:
+            namespace.constants[namesym] = CONST(namespace.name)
         return namespace
 
     @classmethod
     def destroy(cls, scope):
         assert scope.name in env.scopes
         env.remove_scope(scope)
-        if scope.parent:
-            assert scope in scope.parent.children
-            scope.parent.children.remove(scope)
 
     @classmethod
     def get_scopes(cls, bottom_up=True, with_global=False, with_class=False, with_lib=False):
@@ -85,24 +86,33 @@ class Scope(Tagged):
 
     @classmethod
     def reorder_scopes(cls):
-        def set_order(scope, order, ordered):
-            if order > scope.order:
-                scope.order = order
-                ordered.add(scope)
-            elif scope in ordered:
+        # hierarchical order
+        def set_h_order(scope, order):
+            if order > scope.order[0]:
+                scope.order = (order, -1)
+            else:
                 return
             order += 1
             for s in scope.children:
-                set_order(s, order, ordered)
-            if env.call_graph:
-                for s in env.call_graph.succs(scope):
-                    if s not in ordered:
-                        set_order(s, order, ordered)
-        top = cls.global_scope()
-        top.order = 0
-        ordered = set()
-        for f in top.children:
-            set_order(f, 1, ordered)
+                set_h_order(s, order)
+        for s in env.scopes.values():
+            if s.is_namespace():
+                s.order = (0, 0)
+                for f in s.children:
+                    set_h_order(f, 1)
+        if env.depend_graph:
+            nodes = env.depend_graph.bfs_ordered_nodes()
+            for s in nodes:
+                d_order = nodes.index(s)
+                preds = env.depend_graph.preds(s)
+                if preds:
+                    preds_max_order = max([nodes.index(p) for p in preds])
+                else:
+                    preds_max_order = 0
+                if d_order < preds_max_order:
+                    s.order = (s.order[0], d_order)
+                else:
+                    s.order = (s.order[0], preds_max_order + 1)
 
     @classmethod
     def get_class_scopes(cls, bottom_up=True):
@@ -140,7 +150,7 @@ class Scope(Tagged):
         self.loop_tree = LoopNestTree()
         self.callee_instances = defaultdict(set)
         #self.stgs = []
-        self.order = -1
+        self.order = (-1, -1)
         self.block_count = 0
         self.workers = []
         self.worker_owner = None
@@ -186,7 +196,12 @@ class Scope(Tagged):
         return self.name
 
     def __lt__(self, other):
-        return (self.order, self.lineno) < (other.order, other.lineno)
+        if self.order < other.order:
+            return True
+        elif self.order > other.order:
+            return False
+        elif self.order == other.order:
+            return self.lineno < other.lineno
 
     def clone_symbols(self, scope, postfix=''):
         symbol_map = {}
@@ -216,8 +231,6 @@ class Scope(Tagged):
                 stm.false = block_map[stm.false]
             elif stm.is_a(MCJUMP):
                 stm.targets = [block_map[t] for t in stm.targets]
-            elif stm.is_a(PHIBase):
-                stm.defblks = [block_map[blk] for blk in stm.defblks if blk in block_map]
         return block_map, stm_map
 
     def clone(self, prefix, postfix, parent=None):
@@ -422,7 +435,7 @@ class Scope(Tagged):
             new_sym = self.symbols[new_name]
         else:
             new_sym = self.add_sym(new_name, set(orig_sym.tags))
-            new_sym.typ = orig_sym.typ.clone()
+            new_sym.set_type(orig_sym.typ.clone())
             if orig_sym.ancestor:
                 new_sym.ancestor = orig_sym.ancestor
             else:
@@ -447,6 +460,20 @@ class Scope(Tagged):
         assert len(self.entry_block.preds) == 0
         visited = set()
         yield from self.entry_block.traverse(visited)
+
+    def replace_block(self, old, new):
+        new.preds = old.preds[:]
+        new.preds_loop = old.preds_loop[:]
+        new.succs = old.succs[:]
+        new.succs_loop = old.succs_loop[:]
+        for blk in self.traverse_blocks():
+            if blk is old:
+                for pred in old.preds:
+                    pred.replace_succ(old, new)
+                    pred.replace_succ_loop(old, new)
+                for succ in old.succs:
+                    succ.replace_pred(old, new)
+                    succ.replace_pred_loop(old, new)
 
     def append_child(self, child_scope):
         if child_scope not in self.children:

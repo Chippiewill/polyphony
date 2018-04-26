@@ -222,7 +222,7 @@ def single_pipelined_read_seq(inf, signal, step, dst, stage):
         guards = tuple()
     guard = stage.codes[0]
     assert guard.is_a(AHDL_PIPELINE_GUARD)
-    guard.codes_list[0].extend(guards)
+    guard.blocks[0].codes.extend(guards)
     return tuple()
 
 
@@ -280,7 +280,7 @@ def single_pipelined_write_seq(inf, signal, step, src, stage):
         guards = tuple()
     guard = stage.codes[0]
     assert guard.is_a(AHDL_PIPELINE_GUARD)
-    guard.codes_list[0].extend(guards)
+    guard.blocks[0].codes.extend(guards)
     return nonguards
 
 
@@ -561,8 +561,9 @@ class RAMModuleAccessor(IOAccessor):
 
 
 class RAMBridgeInterface(Interface):
-    def __init__(self, name, owner_name, data_width, addr_width):
+    def __init__(self, signal, name, owner_name, data_width, addr_width):
         super().__init__(name, owner_name)
+        self.signal = signal
         self.data_width = data_width
         self.addr_width = addr_width
         self.ports.append(Port('addr', addr_width, 'in', True))
@@ -720,7 +721,7 @@ class PipelinedRAMAccessor(RAMAccessor):
 
         guard = self.stage.codes[0]
         assert guard.is_a(AHDL_PIPELINE_GUARD)
-        guard.codes_list[0].extend(guards)
+        guard.blocks[0].codes.extend(guards)
         return nonguards
 
     def write_sequence(self, step, step_n, offset, src, is_continuous):
@@ -745,7 +746,7 @@ class PipelinedRAMAccessor(RAMAccessor):
             nonguards = tuple()
         guard = self.stage.codes[0]
         assert guard.is_a(AHDL_PIPELINE_GUARD)
-        guard.codes_list[0].extend(guards)
+        guard.blocks[0].codes.extend(guards)
         return nonguards
 
 
@@ -787,8 +788,9 @@ class TupleAccessor(IOAccessor):
 
 
 class RegArrayInterface(Interface):
-    def __init__(self, name, owner_name, data_width, length, direction, subscript):
+    def __init__(self, signal, name, owner_name, data_width, length, direction, subscript):
         super().__init__(name, owner_name)
+        self.signal = signal
         self.data_width = data_width
         self.length = length
         self.subscript = subscript
@@ -816,13 +818,13 @@ class RegArrayInterface(Interface):
 
 
 class RegArrayReadInterface(RegArrayInterface):
-    def __init__(self, name, owner_name, data_width, length, subscript=False):
-        super().__init__(name, owner_name, data_width, length, 'in', subscript)
+    def __init__(self, signal, name, owner_name, data_width, length, subscript=False):
+        super().__init__(signal, name, owner_name, data_width, length, 'in', subscript)
 
 
 class RegArrayWriteInterface(RegArrayInterface, WriteInterface):
-    def __init__(self, name, owner_name, data_width, length, subscript=False):
-        super().__init__(name, owner_name, data_width, length, 'out', subscript)
+    def __init__(self, signal, name, owner_name, data_width, length, subscript=False):
+        super().__init__(signal, name, owner_name, data_width, length, 'out', subscript)
 
 
 class RegArrayAccessor(IOAccessor):
@@ -848,7 +850,7 @@ class RegArrayAccessor(IOAccessor):
     def read_sequence(self, step, step_n, dst):
         assert dst.is_a(AHDL_MEMVAR)
         memnode = dst.memnode.single_source()
-        mem_scope = list(memnode.scopes)[0]
+        mem_scope = memnode.scope
         hdlmodule = env.hdlmodule(mem_scope)
         sig = hdlmodule.signal(memnode.name())
         moves = []
@@ -910,7 +912,7 @@ def fifo_pipelined_read_seq(inf, step, dst, stage):
         nonguards = tuple()
     guard = stage.codes[0]
     assert guard.is_a(AHDL_PIPELINE_GUARD)
-    guard.codes_list[0].extend(guards)
+    guard.blocks[0].codes.extend(guards)
     return nonguards
 
 
@@ -952,7 +954,7 @@ def fifo_pipelined_write_seq(inf, step, src, stage):
                      )
     guard = stage.codes[0]
     assert guard.is_a(AHDL_PIPELINE_GUARD)
-    guard.codes_list[0].extend(guards)
+    guard.blocks[0].codes.extend(guards)
     return nonguards
 
 
@@ -1354,27 +1356,30 @@ class AxiRAMAccessor(Accessor):
         inf = Interface(signal.name, '')
         inf.signal = signal
         super().__init__(inf)
-        self.data_width = data_width
-        self.addr_width = addr_width
+        self.dst_width = data_width
+        self.data_width = 32
+        self.addr_width = 32
         self.is_sink = is_sink
         self.wstrb_width = int(data_width / 8)
         self.ports.append(Port('M_AXI_AWVALID', 1, 'in', False))
         self.ports.append(Port('M_AXI_AWREADY', 1, 'out', False))
-        self.ports.append(Port('M_AXI_AWADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_AWADDR', self.addr_width, 'in', False))
         self.ports.append(Port('M_AXI_WVALID', 1, 'in', False))
         self.ports.append(Port('M_AXI_WREADY', 1, 'out', False))
-        self.ports.append(Port('M_AXI_WDATA', data_width, 'in', False))
+        self.ports.append(Port('M_AXI_WDATA', self.data_width, 'in', False))
         self.ports.append(Port('M_AXI_WSTRB', self.wstrb_width, 'in', False))
         self.ports.append(Port('M_AXI_ARVALID', 1, 'in', False))
         self.ports.append(Port('M_AXI_ARREADY', 1, 'out', False))
-        self.ports.append(Port('M_AXI_ARADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_ARADDR', self.addr_width, 'in', False))
         self.ports.append(Port('M_AXI_RVALID', 1, 'out', False))
         self.ports.append(Port('M_AXI_RREADY', 1, 'in', False))
-        self.ports.append(Port('M_AXI_RDATA', data_width, 'out', False))
+        self.ports.append(Port('M_AXI_RDATA', self.data_width, 'out', False))
         self.ports.append(Port('M_AXI_RRESP', 2, 'out', False))
         self.ports.append(Port('M_AXI_BVALID', 1, 'out', False))
         self.ports.append(Port('M_AXI_BREADY', 1, 'in', False))
         self.ports.append(Port('M_AXI_BRESP', 2, 'out', False))
+
+        self.offset_signal = Signal("{}_offset".format(signal.name), 32, {'int', 'net'})
 
     def regs(self):
         if self.is_sink:
@@ -1411,7 +1416,12 @@ class AxiRAMAccessor(Accessor):
         if step == 0:
             expects = [(AHDL_CONST(1), ar_ready)]
 
-            return (AHDL_MOVE(ar_addr, offset),
+            # Todo this won't work for non multiples of 8 (they need to be rounded UP to nearest 8)
+            shift = self.data_width / 8
+            address = AHDL_OP('LShift', offset, AHDL_CONST(shift))
+            address = AHDL_OP('Add', address, AHDL_VAR(self.offset_signal, Ctx.LOAD))
+
+            return (AHDL_MOVE(ar_addr, address),
                     AHDL_MOVE(ar_valid, AHDL_CONST(1)),
                     AHDL_META_WAIT('WAIT_VALUE', *expects))
         elif step == 1:
@@ -1450,24 +1460,26 @@ class AxiRAMAccessor(Accessor):
 
 
 class AxiRAMBridgeInterface(Interface):
-    def __init__(self, name, owner_name, data_width, addr_width):
+    def __init__(self, signal, name, owner_name, data_width, addr_width):
         super().__init__(name, owner_name)
-        self.data_width = data_width
-        self.addr_width = addr_width
+        self.signal = signal
+        self.dst_width = data_width
+        self.data_width = 32
+        self.addr_width = 32
         self.wstrb_width = int(data_width / 8)
         self.ports.append(Port('M_AXI_AWVALID', 1, 'in', False))
         self.ports.append(Port('M_AXI_AWREADY', 1, 'out', False))
-        self.ports.append(Port('M_AXI_AWADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_AWADDR', self.addr_width, 'in', False))
         self.ports.append(Port('M_AXI_WVALID', 1, 'in', False))
         self.ports.append(Port('M_AXI_WREADY', 1, 'out', False))
-        self.ports.append(Port('M_AXI_WDATA', data_width, 'in', False))
+        self.ports.append(Port('M_AXI_WDATA', self.data_width, 'in', False))
         self.ports.append(Port('M_AXI_WSTRB', self.wstrb_width, 'in', False))
         self.ports.append(Port('M_AXI_ARVALID', 1, 'in', False))
         self.ports.append(Port('M_AXI_ARREADY', 1, 'out', False))
-        self.ports.append(Port('M_AXI_ARADDR', addr_width, 'in', False))
+        self.ports.append(Port('M_AXI_ARADDR', self.addr_width, 'in', False))
         self.ports.append(Port('M_AXI_RVALID', 1, 'out', False))
         self.ports.append(Port('M_AXI_RREADY', 1, 'in', False))
-        self.ports.append(Port('M_AXI_RDATA', data_width, 'out', False))
+        self.ports.append(Port('M_AXI_RDATA', self.data_width, 'out', False))
         self.ports.append(Port('M_AXI_RRESP', 2, 'out', False))
         self.ports.append(Port('M_AXI_BVALID', 1, 'out', False))
         self.ports.append(Port('M_AXI_BREADY', 1, 'in', False))
@@ -1539,8 +1551,8 @@ def create_seq_interface(signal):
 def make_event_task(hdlmodule, reset_stms, stms):
     clk = hdlmodule.gen_sig('clk', 1, {'reserved'})
     rst = hdlmodule.gen_sig('rst', 1, {'reserved'})
-    codes_list = [reset_stms, stms]
-    reset_if = AHDL_IF([AHDL_VAR(rst, Ctx.LOAD), AHDL_CONST(1)], codes_list)
+    blocks = [AHDL_BLOCK('', reset_stms), AHDL_BLOCK('', stms)]
+    reset_if = AHDL_IF([AHDL_VAR(rst, Ctx.LOAD), AHDL_CONST(1)], blocks)
     events = [(AHDL_VAR(clk, Ctx.LOAD), 'rising')]
     return AHDL_EVENT_TASK(events, reset_if)
 

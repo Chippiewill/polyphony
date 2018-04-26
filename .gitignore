@@ -5,3 +5,4 @@ tmp/
 out/
 .idea
 venv
+.suite_ignores

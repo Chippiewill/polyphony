@@ -17,10 +17,11 @@ class InlineOpt(object):
     def __init__(self):
         pass
 
-    def process_all(self):
+    def process_all(self, driver):
         self.dones = set()
         self.inline_counts = defaultdict(int)
-        for scope in env.call_graph.bfs_ordered_nodes():
+        scopes = driver.get_scopes()
+        for scope in scopes:
             if scope not in self.dones:
                 self._process_scope(scope)
 
@@ -91,7 +92,9 @@ class InlineOpt(object):
                 if callee.is_ctor():
                     assert not callee.is_returnable()
                     if call_stm.is_a(MOVE):
-                        attr_map[callee.symbols[env.self_name]] = call_stm.dst
+                        callee_self = call_stm.dst.clone()
+                        callee_self.ctx = Ctx.LOAD
+                        attr_map[callee.symbols[env.self_name]] = callee_self
                 else:
                     if call_stm.is_a(MOVE):
                         object_sym = call.func.exp.qualified_symbol()
@@ -151,13 +154,8 @@ class InlineOpt(object):
                 _, arg = call.args[i]
             else:
                 arg = defval
-            if arg.is_a(TEMP):
-                symbol_map[p] = arg.sym
-                symbol_map[copy] = arg.sym
-            elif arg.is_a(CONST):
-                symbol_map[p] = arg
-            elif arg.is_a(ATTR):
-                symbol_map[p] = arg
+            if arg.is_a([TEMP, ATTR, CONST]):
+                symbol_map[p] = arg.clone()
             else:
                 assert False
         return symbol_map
@@ -378,7 +376,7 @@ class FlattenFieldAccess(IRTransformer):
                 for sym in ir.qualified_symbol():
                     tags |= sym.tags
                 flatsym = scope.add_sym(flatname, tags)
-                flatsym.typ = ancestor.typ
+                flatsym.set_type(ancestor.typ.clone())
                 flatsym.ancestor = ancestor
                 flatsym.add_tag('flattened')
             return head + (flatsym, ) + tail
@@ -449,7 +447,7 @@ class FlattenObjectArgs(IRTransformer):
                 new_sym = module_scope.find_sym(new_name)
                 if not new_sym:
                     new_sym = module_scope.add_sym(new_name)
-                    new_sym.set_type(fsym.typ)
+                    new_sym.set_type(fsym.typ.clone())
                 new_arg = arg.clone()
                 new_arg.set_symbol(new_sym)
                 args.append((new_name, new_arg))
@@ -468,11 +466,11 @@ class FlattenObjectArgs(IRTransformer):
             param_in = worker_scope.find_param_sym(new_name)
             if not param_in:
                 param_in = worker_scope.add_param_sym(new_name)
-                param_in.set_type(sym.typ)
+                param_in.set_type(sym.typ.clone())
             param_copy = worker_scope.find_sym(new_name)
             if not param_copy:
                 param_copy = worker_scope.add_sym(new_name)
-                param_in.set_type(sym.typ)
+                param_in.set_type(sym.typ.clone())
             flatten_params.append((param_in, param_copy))
         new_params = []
         for idx, (sym, copy, defval) in enumerate(worker_scope.params):
@@ -532,10 +530,12 @@ class FlattenModule(IRTransformer):
         inst_name = arg.tail().name
         new_worker = worker_scope.clone(inst_name, str(arg.lineno), parent=parent_module)
         UseDefDetector().process(new_worker)
-        self_sym = new_worker.find_sym('self')
-        self_sym.typ.set_scope(parent_module)
-        VarReplacer.replace_uses(TEMP(self_sym, Ctx.LOAD), arg.exp, new_worker.usedef)
-
+        worker_self = new_worker.find_sym('self')
+        worker_self.typ.set_scope(parent_module)
+        new_exp = arg.exp.clone()
+        ctor_self = self.scope.find_sym('self')
+        new_exp.replace(ctor_self, worker_self)
+        VarReplacer.replace_uses(TEMP(worker_self, Ctx.LOAD), new_exp, new_worker.usedef)
         new_worker_sym = parent_module.add_sym(new_worker.orig_name)
         new_worker_sym.set_type(Type.function(new_worker, None, None))
 
@@ -550,7 +550,9 @@ class ObjectHierarchyCopier(object):
         pass
 
     def _is_inlining_object(self, ir):
-        return (ir.is_a([TEMP, ATTR]) and ir.symbol().typ.is_object() and
+        return (ir.is_a([TEMP, ATTR]) and
+                not ir.symbol().is_param() and
+                ir.symbol().typ.is_object() and
                 not ir.symbol().typ.get_scope().is_module())
 
     def _is_object_copy(self, mov):

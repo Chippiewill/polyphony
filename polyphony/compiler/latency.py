@@ -9,14 +9,15 @@ CALL_MINIMUM_STEP = 5
 def get_call_latency(call, stm):
     # FIXME: It is better to ask HDLInterface the I/O latency
     is_pipelined = stm.block.synth_params['scheduling'] == 'pipeline'
-    if call.func_scope().name.startswith('polyphony.io.Queue') and call.func_scope().name.endswith('.rd'):
-        if is_pipelined:
-            return UNIT_STEP * 2
-        return UNIT_STEP * 3
-    elif call.func_scope().name.startswith('polyphony.io.Queue') and call.func_scope().name.endswith('.wr'):
-        if is_pipelined:
-            return UNIT_STEP * 1
-        return UNIT_STEP * 3
+    if call.func_scope().name.startswith('polyphony.io.Queue'):
+        if call.func_scope().name.endswith('.rd'):
+            if is_pipelined:
+                return UNIT_STEP * 2
+            return UNIT_STEP * 3
+        elif call.func_scope().name.endswith('.wr'):
+            if is_pipelined:
+                return UNIT_STEP * 1
+            return UNIT_STEP * 3
     elif call.func_scope().is_method() and call.func_scope().parent.is_port():
         receiver = call.func.tail()
         assert receiver.typ.is_port()
@@ -70,31 +71,34 @@ def get_syscall_latency(call):
 def _get_latency(tag):
     assert isinstance(tag, IR)
     if tag.is_a(MOVE):
-        if tag.src.is_a(CALL):
+        if tag.dst.is_a(TEMP) and tag.dst.sym.is_alias():
+            return 0
+        elif tag.src.is_a(CALL):
             return get_call_latency(tag.src, tag)
         elif tag.src.is_a(NEW):
             return 0
         elif tag.src.is_a(TEMP) and tag.src.sym.typ.is_port():
             return 0
-        elif tag.dst.is_a(TEMP) and tag.dst.sym.is_alias():
-            return 0
-        elif tag.dst.is_a(TEMP) and tag.dst.symbol().typ.is_seq() and tag.src.is_a(TEMP) and tag.src.symbol().is_param():
-            memnode = tag.dst.symbol().typ.get_memnode()
-            if not memnode.can_be_reg():
-                return 0
         elif tag.dst.is_a(ATTR):
             return UNIT_STEP * 2
-        elif tag.src.is_a(ARRAY):
-            memnode = tag.src.sym.typ.get_memnode()
-            if memnode.can_be_reg():
-                return 1
-            else:
-                return UNIT_STEP * len(tag.src.items * tag.src.repeat.value)
         elif tag.src.is_a(MREF):
             memnode = tag.src.mem.symbol().typ.get_memnode()
             if memnode.is_immutable() or not memnode.is_writable() or memnode.can_be_reg():
                 return 1
             return UNIT_STEP * 3, UNIT_STEP * 1
+        elif tag.dst.is_a(TEMP) and tag.dst.symbol().typ.is_seq():
+            memnode = tag.dst.symbol().typ.get_memnode()
+            if tag.src.is_a(ARRAY):
+                if memnode.can_be_reg():
+                    return 1
+                elif not memnode.is_writable():
+                    return 0
+                else:
+                    return UNIT_STEP * len(tag.src.items * tag.src.repeat.value)
+            if tag.src.is_a(TEMP) and tag.src.symbol().typ.is_seq():  #is_param():
+            #if tag.src.is_a(TEMP) and tag.src.symbol().is_param():
+                if not memnode.can_be_reg():
+                    return 0, 0
         if tag.dst.symbol().is_alias():
             return 0
     elif tag.is_a(EXPR):
@@ -105,12 +109,12 @@ def _get_latency(tag):
         elif tag.exp.is_a(MSTORE):
             memnode = tag.exp.mem.symbol().typ.get_memnode()
             if memnode.can_be_reg():
-                return 1
+                return UNIT_STEP * 1
             return UNIT_STEP * 1, UNIT_STEP * 1
     elif tag.is_a(PHI):
-        if tag.var.symbol().is_alias():
+        if tag.var.symbol().typ.is_seq() and not tag.var.symbol().typ.get_memnode().can_be_reg():
             return 0
-        elif tag.var.symbol().typ.is_seq() and not tag.var.symbol().typ.get_memnode().can_be_reg():
+        if tag.var.symbol().is_alias():
             return 0
     elif tag.is_a(UPHI):
         if tag.var.symbol().is_alias():
