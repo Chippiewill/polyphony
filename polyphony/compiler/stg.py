@@ -858,7 +858,7 @@ class AHDLTranslator(object):
             return
         elif src.is_a(AHDL_VAR) and dst.is_a(AHDL_VAR) and src.sig == dst.sig:
             return
-        elif src.is_a(AHDL_VAR) and dst.is_a(AHDL_VAR) and ir.src.sym.typ.has_protocol() and ir.src.sym.typ.get_protocol() == 'axi':
+        elif src.is_a(AHDL_VAR) and dst.is_a(AHDL_VAR) and ir.src.sym.typ.has_protocol() and ir.src.sym.typ.get_protocol() == 'axi' and src.sig.is_input():
             return
         elif src.is_a(AHDL_LOAD):
             self._emit_memload_sequence(src, self.sched_time)

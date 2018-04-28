@@ -1,6 +1,7 @@
 ﻿import argparse
 import json
 import os
+import pathlib
 import sys
 from .ahdlusedef import AHDLUseDefDetector
 from .bitwidth import BitwidthReducer
@@ -733,6 +734,7 @@ def setup(src_file, options):
         except:
             print('invalid config option', options.config)
     if env.dev_debug_mode:
+        pathlib.Path(os.path.dirname(logging_setting['filename'])).mkdir(parents=True, exist_ok=True)
         logging.basicConfig(**logging_setting)
 
     translator = IRTranslator()
