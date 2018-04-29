@@ -1441,23 +1441,55 @@ class AxiRAMAccessor(Accessor):
                     AHDL_MOVE(dst, r_data))
 
     def write_sequence(self, step, step_n, offset, src, is_continuous):
-        addr = port2ahdl(self, 'addr')
-        we = port2ahdl(self, 'we')
-        req = port2ahdl(self, 'req')
-        d = port2ahdl(self, 'd')
+        aw_addr = port2ahdl(self, 'M_AXI_AWADDR')
+        aw_valid = port2ahdl(self, 'M_AXI_AWVALID')
+        aw_ready = port2ahdl(self, 'M_AXI_AWREADY')
+
+        w_valid = port2ahdl(self, 'M_AXI_WVALID')
+        w_ready = port2ahdl(self, 'M_AXI_WREADY')
+        w_data = port2ahdl(self, 'M_AXI_WDATA')
+        w_strb = port2ahdl(self, 'M_AXI_WSTRB')
+
+        b_resp = port2ahdl(self, 'M_AXI_BRESP')
+        b_valid = port2ahdl(self, 'M_AXI_BVALID')
+        b_ready = port2ahdl(self, 'M_AXI_BREADY')
 
         if step == 0:
-            we_stm = AHDL_MOVE(we, AHDL_CONST(1))
-            req_stm = AHDL_MOVE(req, AHDL_CONST(1))
-            return (AHDL_MOVE(addr, offset),
-                    we_stm,
-                    req_stm,
-                    AHDL_MOVE(d, src))
+            expects = [(AHDL_CONST(1), aw_ready)]
+
+            # Todo this won't work for non multiples of 8 (they need to be rounded UP to nearest 8)
+            shift = int(math.sqrt(self.data_width // 8))
+            address = AHDL_OP('LShift', offset, AHDL_CONST(shift))
+            address = AHDL_OP('Add', address, AHDL_VAR(self.offset_signal, Ctx.LOAD))
+
+            return (AHDL_MOVE(aw_addr, address),
+                    AHDL_MOVE(aw_valid, AHDL_CONST(1)),
+                    AHDL_META_WAIT('WAIT_VALUE', *expects))
         elif step == 1:
+            expects = [(AHDL_CONST(1), w_ready)]
+
+            return (AHDL_MOVE(w_data, src),
+                    AHDL_MOVE(w_valid, AHDL_CONST(1)),
+                    # Todo change strobe width for different data-types
+                    AHDL_MOVE(w_strb, AHDL_CONST(0xF)),
+                    AHDL_META_WAIT('WAIT_VALUE', *expects))
+        elif step == 2:
+            expects = [(AHDL_CONST(1), b_valid)]
+
+            return (AHDL_MOVE(w_valid, AHDL_CONST(0)),
+                    AHDL_MOVE(b_ready, AHDL_CONST(1)),
+                    AHDL_META_WAIT('WAIT_VALUE', *expects),)
+        elif step == 3:
             if is_continuous:
-                return tuple()
-            else:
-                return (AHDL_MOVE(req, AHDL_CONST(0)), )
+                assert "Nope"
+
+            return AHDL_MOVE(b_ready, AHDL_CONST(0)),
+
+        # elif step == 1:
+        #     if is_continuous:
+        #         return tuple()
+        #     else:
+        #         return (AHDL_MOVE(req, AHDL_CONST(0)), )
 
 
 class AxiRAMBridgeInterface(Interface):
